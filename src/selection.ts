@@ -168,6 +168,7 @@ export async function listSelectionCandidates(
 
 export async function collectLocalSelection(input: {
 	readonly agentRoot: string;
+	readonly enforceAuthPermissions?: boolean;
 	readonly includes: readonly SafeRelativePath[];
 }): Promise<LocalSelection> {
 	const root = assertSafeAgentRoot(input.agentRoot);
@@ -209,6 +210,7 @@ export async function collectLocalSelection(input: {
 		const contents = await readRegularFileSnapshot(absolutePath, {
 			errorMessage: 'Unable to read selected file',
 			maxBytes: MAX_FILE_BYTES,
+			...(relativePath === 'auth.json' && input.enforceAuthPermissions ? { mode: 0o600 } : {}),
 		});
 		if (contents === undefined) {
 			return;

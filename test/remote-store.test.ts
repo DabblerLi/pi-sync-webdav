@@ -109,6 +109,33 @@ describe('remote store', () => {
 		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
 	});
 
+	it('downloads only manifest-declared revision files and verifies their integrity', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const published = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('expected', 'utf8'), path: parseManifestPath('settings.json') },
+			],
+		});
+		const file = published.manifest.files[0];
+		if (file === undefined) {
+			throw new Error('Expected published test file');
+		}
+
+		await expect(store.readRevisionFile(published.manifest, file)).resolves.toEqual(
+			Buffer.from('expected', 'utf8'),
+		);
+		await gateway.writeFile(
+			parseRemotePath(`${root}/revisions/${published.manifest.revision}/settings.json`),
+			Buffer.from('tampered', 'utf8'),
+		);
+		await expect(store.readRevisionFile(published.manifest, file)).rejects.toThrow(
+			'Remote revision file failed integrity verification',
+		);
+	});
+
 	it('requires explicit permission before replacing an invalid current manifest', async () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();

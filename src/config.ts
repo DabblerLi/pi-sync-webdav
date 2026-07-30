@@ -27,8 +27,12 @@ export interface PendingPackageOperation {
 	readonly source: string;
 }
 
+export interface StoredConnection extends NormalizedConnection {
+	readonly readOnly: boolean;
+}
+
 export interface PluginConfig {
-	readonly connection: NormalizedConnection;
+	readonly connection: StoredConnection;
 	readonly pendingPackageOperations?: readonly PendingPackageOperation[];
 	readonly pushInclude: readonly SafeRelativePath[];
 	readonly syncState?: SyncState;
@@ -65,17 +69,27 @@ function requireString(value: unknown): string {
 	return value;
 }
 
-function parseConnection(value: unknown, allowDerivedFields: boolean): NormalizedConnection {
+function parseConnection(value: unknown, allowDerivedFields: boolean): StoredConnection {
 	if (!isRecord(value)) {
 		invalidConfig();
 	}
 	const expectedKeys = Object.hasOwn(value, 'requiresInsecureTransportConfirmation')
-		? ['url', 'remotePath', 'username', 'password', 'requiresInsecureTransportConfirmation']
-		: ['url', 'remotePath', 'username', 'password'];
-	if (!allowDerivedFields && expectedKeys.length !== 4) {
+		? [
+				'url',
+				'remotePath',
+				'username',
+				'password',
+				'readOnly',
+				'requiresInsecureTransportConfirmation',
+			]
+		: ['url', 'remotePath', 'username', 'password', 'readOnly'];
+	if (!allowDerivedFields && expectedKeys.length !== 5) {
 		invalidConfig();
 	}
 	assertExactKeys(value, expectedKeys);
+	if (typeof value.readOnly !== 'boolean') {
+		invalidConfig();
+	}
 	const connection = normalizeConnection({
 		password: requireString(value.password),
 		remotePath: requireString(value.remotePath),
@@ -88,7 +102,7 @@ function parseConnection(value: unknown, allowDerivedFields: boolean): Normalize
 	) {
 		invalidConfig();
 	}
-	return connection;
+	return { ...connection, readOnly: value.readOnly };
 }
 
 function parseUniquePaths(
@@ -119,6 +133,48 @@ function hasControlCharacters(value: string): boolean {
 	return false;
 }
 
+function hasEmbeddedPackageCredentials(source: string): boolean {
+	if (source.startsWith('npm:')) {
+		const spec = source.slice('npm:'.length);
+		if (spec.includes('?') || spec.includes('#')) {
+			return true;
+		}
+		const urlMatch = /https?:\/\//iu.exec(spec);
+		if (urlMatch === null || urlMatch.index === undefined) {
+			return false;
+		}
+		try {
+			const url = new URL(spec.slice(urlMatch.index));
+			return url.username.length > 0 || url.password.length > 0 || url.search.length > 0;
+		} catch {
+			return false;
+		}
+	}
+	const raw =
+		source.startsWith('git:') && !source.startsWith('git://')
+			? source.slice('git:'.length)
+			: source;
+	if (!raw.includes('://')) {
+		const scpMatch = raw.match(/^git@([^:]+):.+$/u);
+		if (scpMatch !== null) {
+			return scpMatch[1]?.includes('@') ?? true;
+		}
+		const separator = raw.indexOf('/');
+		return separator > 0 && raw.slice(0, separator).includes('@');
+	}
+	try {
+		const url = new URL(raw);
+		return (
+			url.password.length > 0 ||
+			url.search.length > 0 ||
+			url.hash.length > 0 ||
+			(url.username.length > 0 && !(url.protocol === 'ssh:' && url.username === 'git'))
+		);
+	} catch {
+		return false;
+	}
+}
+
 function parsePendingPackageOperations(value: unknown): readonly PendingPackageOperation[] {
 	if (!Array.isArray(value) || value.length === 0) {
 		invalidConfig();
@@ -135,7 +191,8 @@ function parsePendingPackageOperations(value: unknown): readonly PendingPackageO
 				operation.action !== 'update') ||
 			typeof operation.source !== 'string' ||
 			operation.source.length === 0 ||
-			hasControlCharacters(operation.source)
+			hasControlCharacters(operation.source) ||
+			hasEmbeddedPackageCredentials(operation.source)
 		) {
 			invalidConfig();
 		}
@@ -200,6 +257,7 @@ function serializeConfig(config: PluginConfig): string {
 	const persistedConfig = {
 		connection: {
 			password: validated.connection.password,
+			readOnly: validated.connection.readOnly,
 			remotePath: validated.connection.remotePath,
 			url: validated.connection.url,
 			username: validated.connection.username,
@@ -253,7 +311,11 @@ async function ensurePrivateDirectory(agentRoot: string): Promise<string> {
 async function assertConfigFileIsSafe(configFile: string): Promise<boolean> {
 	try {
 		const entry = await fs.lstat(configFile);
-		if (!entry.isFile() || entry.isSymbolicLink()) {
+		if (
+			!entry.isFile() ||
+			entry.isSymbolicLink() ||
+			(process.platform !== 'win32' && (entry.mode & 0o077) !== 0)
+		) {
 			throw new Error('Unsafe private configuration file');
 		}
 		return true;
@@ -287,14 +349,17 @@ export async function readConfig(agentRoot: string): Promise<PluginConfig | unde
 		}
 		throw new Error('Unable to inspect private configuration directory');
 	}
-	if (!directoryEntry.isDirectory() || directoryEntry.isSymbolicLink()) {
+	if (
+		!directoryEntry.isDirectory() ||
+		directoryEntry.isSymbolicLink() ||
+		(process.platform !== 'win32' && (directoryEntry.mode & 0o077) !== 0)
+	) {
 		throw new Error('Unsafe private configuration directory');
 	}
 	if (!(await assertConfigFileIsSafe(paths.configFile))) {
 		return undefined;
 	}
 
-	await fs.chmod(paths.configFile, 0o600);
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(await fs.readFile(paths.configFile, 'utf8'));

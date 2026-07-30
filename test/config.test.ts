@@ -23,7 +23,7 @@ function createConfig() {
 	});
 
 	return {
-		connection,
+		connection: { ...connection, readOnly: false },
 		pushInclude: [parsePushInclude('settings.json'), parsePushInclude('themes')],
 		syncState: {
 			connectionFingerprint: connectionFingerprint(connection),
@@ -60,6 +60,20 @@ describe('private configuration', () => {
 		}
 	});
 
+	it('reads private configuration without mutating it', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
+		temporaryDirectories.push(root);
+		const config = createConfig();
+		await writeConfig(root, config);
+		const path = getPrivatePaths(root).configFile;
+		const before = await stat(path);
+
+		await expect(readConfig(root)).resolves.toEqual(config);
+		const after = await stat(path);
+		expect(after.mode).toBe(before.mode);
+		expect(after.mtimeMs).toBe(before.mtimeMs);
+	});
+
 	it('persists the minimal pending package-operation queue', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
 		temporaryDirectories.push(root);
@@ -73,6 +87,20 @@ describe('private configuration', () => {
 
 		await writeConfig(root, config);
 
+		await expect(readConfig(root)).resolves.toEqual(config);
+	});
+
+	it('persists scoped npm package retries without treating the scope as credentials', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
+		temporaryDirectories.push(root);
+		const config = {
+			...createConfig(),
+			pendingPackageOperations: [
+				{ action: 'install' as const, source: 'npm:@scope/package@1.0.0' },
+			],
+		};
+
+		await writeConfig(root, config);
 		await expect(readConfig(root)).resolves.toEqual(config);
 	});
 
@@ -97,6 +125,32 @@ describe('private configuration', () => {
 		{ pendingPackageOperations: [{ action: 'retry', source: 'npm:example-package' }] },
 		{ pendingPackageOperations: [{ action: 'install', source: '' }] },
 		{ pendingPackageOperations: [{ action: 'install', source: 'npm:\u0085example-package' }] },
+		{
+			pendingPackageOperations: [
+				{ action: 'install', source: 'ssh://token@example.com/acme/private-package@v1' },
+			],
+		},
+		{
+			pendingPackageOperations: [
+				{ action: 'install', source: 'git:alice:secret@example.com/acme/private-package@v1' },
+			],
+		},
+		{
+			pendingPackageOperations: [
+				{ action: 'install', source: 'git:git@token@example.com:acme/private-package@v1' },
+			],
+		},
+		{
+			pendingPackageOperations: [{ action: 'install', source: 'file:///tmp/package?token=secret' }],
+		},
+		{
+			pendingPackageOperations: [
+				{
+					action: 'install',
+					source: 'npm:example@https://token@registry.example/package.tgz',
+				},
+			],
+		},
 		{ pendingPackageOperations: ['npm:example-package'] },
 		{
 			pendingPackageOperations: [
@@ -121,6 +175,7 @@ describe('private configuration', () => {
 		temporaryDirectories.push(root);
 		const paths = getPrivatePaths(root);
 		await mkdir(paths.directory, { recursive: true });
+		await chmod(paths.directory, 0o700);
 		await writeFile(paths.configFile, '{"password":"correct horse battery staple"}', 'utf8');
 		await chmod(paths.configFile, 0o600);
 

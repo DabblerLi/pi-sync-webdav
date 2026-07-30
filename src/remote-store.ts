@@ -6,6 +6,7 @@ import {
 	parseManifest,
 	serializeManifest,
 	validateManifest,
+	type ManifestFile,
 	type ManifestV1,
 	type RevisionId,
 } from './manifest.js';
@@ -166,6 +167,27 @@ export class RemoteStore {
 			...rawManifest,
 			manifest: decodeManifest(rawManifest.bytes),
 		};
+	}
+
+	async readRevisionFile(
+		manifest: ManifestV1,
+		file: ManifestFile,
+		signal?: AbortSignal,
+	): Promise<Buffer> {
+		const validatedManifest = validateManifest(manifest);
+		const expected = validatedManifest.files.find((candidate) => candidate.path === file.path);
+		if (expected === undefined || expected.sha256 !== file.sha256 || expected.size !== file.size) {
+			throw new Error('Invalid revision file request');
+		}
+		const contents = await this.#gateway.readFile(
+			remoteChild(this.#revisionPath(validatedManifest.revision), expected.path),
+			undefined,
+			signal,
+		);
+		if (contents.byteLength !== expected.size || sha256(contents) !== expected.sha256) {
+			throw new Error('Remote revision file failed integrity verification');
+		}
+		return contents;
 	}
 
 	async verifyWriteCapability(): Promise<WriteCapabilityResult> {

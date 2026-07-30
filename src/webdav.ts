@@ -23,7 +23,11 @@ export interface WebDavGateway {
 	deletePath(path: RemotePath): Promise<void>;
 	directoryContents(path: RemotePath): Promise<readonly RemoteDirectoryEntry[]>;
 	exists(path: RemotePath): Promise<boolean>;
-	readFile(path: RemotePath, onProgress?: (progress: TransferProgress) => void): Promise<Buffer>;
+	readFile(
+		path: RemotePath,
+		onProgress?: (progress: TransferProgress) => void,
+		signal?: AbortSignal,
+	): Promise<Buffer>;
 	writeFile(
 		path: RemotePath,
 		contents: Buffer,
@@ -179,12 +183,13 @@ class SafeWebDavGateway implements WebDavGateway {
 	async readFile(
 		path: RemotePath,
 		onProgress?: (progress: TransferProgress) => void,
+		externalSignal?: AbortSignal,
 	): Promise<Buffer> {
 		const remotePath = parseRemotePath(path);
 		return this.#execute(async (signal) => {
 			const stream = this.#client.createReadStream(remotePath, { signal });
 			return readStreamWithLimit(stream, this.#maxResponseBytes, onProgress);
-		});
+		}, externalSignal);
 	}
 
 	async writeFile(
@@ -207,11 +212,17 @@ class SafeWebDavGateway implements WebDavGateway {
 		}
 	}
 
-	async #execute<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+	async #execute<T>(
+		operation: (signal: AbortSignal) => Promise<T>,
+		externalSignal?: AbortSignal,
+	): Promise<T> {
 		let latestError: WebDavRequestError | undefined;
 		for (let attempt = 0; attempt <= this.#retryDelaysMs.length; attempt += 1) {
+			if (externalSignal?.aborted) {
+				throw new WebDavRequestError('WebDAV request cancelled', { retryable: false });
+			}
 			try {
-				return await this.#executeOnce(operation);
+				return await this.#executeOnce(operation, externalSignal);
 			} catch (error: unknown) {
 				const safeError = toSafeRequestError(error);
 				latestError = safeError;
@@ -225,18 +236,32 @@ class SafeWebDavGateway implements WebDavGateway {
 		throw latestError ?? new WebDavRequestError('WebDAV request failed', { retryable: false });
 	}
 
-	async #executeOnce<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+	async #executeOnce<T>(
+		operation: (signal: AbortSignal) => Promise<T>,
+		externalSignal?: AbortSignal,
+	): Promise<T> {
 		const controller = new AbortController();
+		const abortForExternalSignal = (): void => controller.abort();
 		const timeout = setTimeout(() => controller.abort(), this.#requestTimeoutMs);
+		if (externalSignal !== undefined) {
+			externalSignal.addEventListener('abort', abortForExternalSignal, { once: true });
+		}
 		try {
+			if (externalSignal?.aborted) {
+				throw new WebDavRequestError('WebDAV request cancelled', { retryable: false });
+			}
 			return await operation(controller.signal);
 		} catch (error: unknown) {
+			if (externalSignal?.aborted) {
+				throw new WebDavRequestError('WebDAV request cancelled', { retryable: false });
+			}
 			if (controller.signal.aborted) {
 				throw new WebDavRequestError('WebDAV request timed out', { retryable: true });
 			}
 			throw error;
 		} finally {
 			clearTimeout(timeout);
+			externalSignal?.removeEventListener('abort', abortForExternalSignal);
 		}
 	}
 }

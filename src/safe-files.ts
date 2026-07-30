@@ -19,7 +19,7 @@ function sameFile(
 
 export async function readRegularFileSnapshot(
 	path: string,
-	options: { readonly errorMessage: string; readonly maxBytes: number },
+	options: { readonly errorMessage: string; readonly maxBytes: number; readonly mode?: number },
 ): Promise<Buffer | undefined> {
 	let initial;
 	try {
@@ -51,6 +51,9 @@ export async function readRegularFileSnapshot(
 		const contents = await handle.readFile();
 		if (contents.byteLength > options.maxBytes) {
 			throw new Error(options.errorMessage);
+		}
+		if (options.mode !== undefined) {
+			await handle.chmod(options.mode);
 		}
 		return contents;
 	} finally {

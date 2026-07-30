@@ -79,6 +79,23 @@ describe('WebDAV gateway', () => {
 		expect(server.requests.filter((request) => request.method === 'GET')).toHaveLength(3);
 	});
 
+	it('cancels a read when its caller aborts', async () => {
+		const { gateway, server } = await createGateway();
+		const root = parseRemotePath('pi-sync-webdav');
+		const file = parseRemotePath('pi-sync-webdav/cancel.txt');
+		await gateway.createDirectory(root);
+		await gateway.writeFile(file, Buffer.from('cancel', 'utf8'));
+		server.delayNext('GET', 'pi-sync-webdav/cancel.txt', 50);
+		const controller = new AbortController();
+		const request = gateway.readFile(file, undefined, controller.signal);
+		controller.abort();
+
+		await expect(request).rejects.toMatchObject({
+			message: 'WebDAV request cancelled',
+			retryable: false,
+		});
+	});
+
 	it('bounds successful/error responses and redacts authentication failures', async () => {
 		const { gateway, server } = await createGateway();
 		const root = parseRemotePath('pi-sync-webdav');

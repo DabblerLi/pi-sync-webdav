@@ -1,4 +1,4 @@
-import { mkdir, symlink, truncate, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, stat, symlink, truncate, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -98,6 +98,39 @@ describe('local selection collection', () => {
 		expect(selection.totalBytes).toBe(
 			selection.files.reduce((total, file) => total + file.contents.byteLength, 0),
 		);
+	});
+
+	it('does not mutate auth.json permissions during a read-only selection', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-selection-');
+		temporaryDirectories.push(root);
+		const authFile = join(root, 'auth.json');
+		await writeFile(authFile, '{"token":"private"}', 'utf8');
+		await chmod(authFile, 0o644);
+
+		await collectLocalSelection({
+			agentRoot: root,
+			includes: [parsePushInclude('auth.json')],
+		});
+		if (process.platform !== 'win32') {
+			expect((await stat(authFile)).mode & 0o777).toBe(0o644);
+		}
+	});
+
+	it('restores auth.json to owner-only permissions when preparing a push', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-selection-');
+		temporaryDirectories.push(root);
+		const authFile = join(root, 'auth.json');
+		await writeFile(authFile, '{"token":"private"}', 'utf8');
+		await chmod(authFile, 0o644);
+
+		await collectLocalSelection({
+			agentRoot: root,
+			enforceAuthPermissions: true,
+			includes: [parsePushInclude('auth.json')],
+		});
+		if (process.platform !== 'win32') {
+			expect((await stat(authFile)).mode & 0o777).toBe(0o600);
+		}
 	});
 
 	it('allows missing selected roots but rejects files over the configured limit', async () => {

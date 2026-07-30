@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
-export default function registerSyncWebdav(_pi: ExtensionAPI): void {
-	void _pi;
+import { registerSyncWebdavCommands } from './commands.js';
+
+export default function registerSyncWebdav(pi: ExtensionAPI): void {
+	registerSyncWebdavCommands(pi);
 }

@@ -17,6 +17,7 @@
 	"homepage": "https://github.com/DabblerLi/pi-sync-webdav#readme",
 	"keywords": [
 		"pi",
+		"pi-coding-agent",
 		"pi-package",
 		"pi-extension",
 		"webdav",
@@ -44,7 +45,8 @@
 		"pack:check": "npm pack --dry-run"
 	},
 	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": "*"
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
 	},
 	"dependencies": {
 		"webdav": "^5.10.0"
