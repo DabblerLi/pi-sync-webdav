@@ -98,8 +98,11 @@ export function validateManifest(value: unknown): ManifestV1 {
 	}
 
 	const files = value.files.map(parseManifestFile);
-	const paths = new Set(files.map((file) => file.path));
-	if (paths.size !== files.length) {
+	const sortedPaths = files.map((file) => file.path).sort();
+	if (
+		new Set(sortedPaths).size !== sortedPaths.length ||
+		sortedPaths.some((path, index) => index > 0 && path.startsWith(`${sortedPaths[index - 1]}/`))
+	) {
 		invalidManifest();
 	}
 

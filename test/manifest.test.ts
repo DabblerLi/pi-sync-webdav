@@ -98,6 +98,14 @@ describe('manifest validation', () => {
 		{
 			version: 1,
 			revision: generateRevisionId(),
+			files: [
+				{ path: 'themes', sha256: 'a'.repeat(64), size: 1 },
+				{ path: 'themes/dark.json', sha256: 'b'.repeat(64), size: 1 },
+			],
+		},
+		{
+			version: 1,
+			revision: generateRevisionId(),
 			files: [{ path: 'npm/package.json', sha256: 'a'.repeat(64), size: 1 }],
 		},
 	])('rejects invalid manifests', (manifest) => {
