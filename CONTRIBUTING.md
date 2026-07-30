@@ -25,16 +25,9 @@ npm test
 npm run pack:check
 ```
 
-## Scope and design rules
+## Design context
 
-Read [`docs/design.md`](docs/design.md) before changing implementation code.
-
-Preserve the project's core behavior:
-
-- Support one Basic Auth WebDAV target and manual synchronization only.
-- Publish complete remote revisions; do not overwrite an active revision in place.
-- Never synchronize `npm/`, `git/`, or the package's private state.
-- Preserve safe pull deletion, local-only backups, symlink protection, path validation, and secret redaction.
+[`docs/design.md`](docs/design.md) describes the current behavior and is useful background for implementation changes. Update it when a change alters product behavior.
 
 ## Tests
 

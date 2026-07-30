@@ -74,98 +74,14 @@ describe('private configuration', () => {
 		expect(after.mtimeMs).toBe(before.mtimeMs);
 	});
 
-	it('persists the minimal pending package-operation queue', async () => {
-		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
-		temporaryDirectories.push(root);
-		const config = {
-			...createConfig(),
-			pendingPackageOperations: [
-				{ action: 'install' as const, source: 'npm:example-package@1.2.3' },
-				{ action: 'remove' as const, source: 'git:github.com/example/obsolete-package@v1' },
-			],
-		};
-
-		await writeConfig(root, config);
-
-		await expect(readConfig(root)).resolves.toEqual(config);
-	});
-
-	it('persists scoped npm package retries without treating the scope as credentials', async () => {
-		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
-		temporaryDirectories.push(root);
-		const config = {
-			...createConfig(),
-			pendingPackageOperations: [
-				{ action: 'install' as const, source: 'npm:@scope/package@1.0.0' },
-			],
-		};
-
-		await writeConfig(root, config);
-		await expect(readConfig(root)).resolves.toEqual(config);
-	});
-
-	it('rejects malformed pending package-operation queues', async () => {
+	it('rejects obsolete pending package state', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
 		temporaryDirectories.push(root);
 
 		await expect(
 			writeConfig(root, {
 				...createConfig(),
-				pendingPackageOperations: [],
-			}),
-		).rejects.toThrow('Invalid plugin configuration');
-	});
-
-	it.each([
-		{
-			pendingPackageOperations: [
-				{ action: 'install', source: 'npm:example-package', unexpected: true },
-			],
-		},
-		{ pendingPackageOperations: [{ action: 'retry', source: 'npm:example-package' }] },
-		{ pendingPackageOperations: [{ action: 'install', source: '' }] },
-		{ pendingPackageOperations: [{ action: 'install', source: 'npm:\u0085example-package' }] },
-		{
-			pendingPackageOperations: [
-				{ action: 'install', source: 'ssh://token@example.com/acme/private-package@v1' },
-			],
-		},
-		{
-			pendingPackageOperations: [
-				{ action: 'install', source: 'git:alice:secret@example.com/acme/private-package@v1' },
-			],
-		},
-		{
-			pendingPackageOperations: [
-				{ action: 'install', source: 'git:git@token@example.com:acme/private-package@v1' },
-			],
-		},
-		{
-			pendingPackageOperations: [{ action: 'install', source: 'file:///tmp/package?token=secret' }],
-		},
-		{
-			pendingPackageOperations: [
-				{
-					action: 'install',
-					source: 'npm:example@https://token@registry.example/package.tgz',
-				},
-			],
-		},
-		{ pendingPackageOperations: ['npm:example-package'] },
-		{
-			pendingPackageOperations: [
-				{ action: 'install', source: 'npm:example-package' },
-				{ action: 'install', source: 'npm:example-package' },
-			],
-		},
-	])('rejects invalid pending package-operation entries', async ({ pendingPackageOperations }) => {
-		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
-		temporaryDirectories.push(root);
-
-		await expect(
-			writeConfig(root, {
-				...createConfig(),
-				pendingPackageOperations,
+				pendingPackageOperations: [{ action: 'install', source: 'npm:example-package' }],
 			} as unknown as Parameters<typeof writeConfig>[1]),
 		).rejects.toThrow('Invalid plugin configuration');
 	});
@@ -231,6 +147,18 @@ describe('private configuration', () => {
 			url: 'https://example.com/dav/',
 			username: 'alice',
 		});
+		const changedUrl = normalizeConnection({
+			password: 'two',
+			remotePath: 'backup',
+			url: 'https://example.com/other',
+			username: 'alice',
+		});
+		const changedPath = normalizeConnection({
+			password: 'two',
+			remotePath: 'other-backup',
+			url: 'https://example.com/dav/',
+			username: 'alice',
+		});
 		const changedUser = normalizeConnection({
 			password: 'two',
 			remotePath: 'backup',
@@ -239,6 +167,8 @@ describe('private configuration', () => {
 		});
 
 		expect(connectionFingerprint(first)).toBe(connectionFingerprint(equivalent));
+		expect(connectionFingerprint(first)).not.toBe(connectionFingerprint(changedUrl));
+		expect(connectionFingerprint(first)).not.toBe(connectionFingerprint(changedPath));
 		expect(connectionFingerprint(first)).not.toBe(connectionFingerprint(changedUser));
 	});
 });

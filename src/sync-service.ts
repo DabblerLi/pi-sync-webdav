@@ -17,8 +17,6 @@ import type { ManifestFile, ManifestV1 } from './manifest.js';
 import {
 	applyPackageOperations,
 	createGlobalPackageSyncRuntime,
-	packageOperationQueue,
-	pendingPackageOperationsForDesiredState,
 	planPackageSync,
 	readGlobalPackageSources,
 	type PackageOperationResult,
@@ -45,7 +43,7 @@ export interface PullPreparation {
 	readonly downloadedSettings:
 		{ readonly contents: Buffer; readonly file: ManifestFile } | undefined;
 	readonly manifest: ManifestV1;
-	readonly packageOperations: readonly import('./config.js').PendingPackageOperation[];
+	readonly packageOperations: readonly import('./package-sync.js').PackageOperation[];
 	readonly plan: PullPlan;
 	readonly store: RemoteStore;
 }
@@ -65,11 +63,9 @@ export type PackageRuntimeFactory = (agentRoot: string) => PackageSyncRuntime;
 function configWithSyncState(
 	config: PluginConfig,
 	managedPaths: readonly import('./paths.js').SafeRelativePath[],
-	pendingPackageOperations: readonly import('./config.js').PendingPackageOperation[] | undefined,
 ): PluginConfig {
 	return {
 		connection: config.connection,
-		...(pendingPackageOperations === undefined ? {} : { pendingPackageOperations }),
 		pushInclude: config.pushInclude,
 		syncState: {
 			connectionFingerprint: connectionFingerprint(config.connection),
@@ -180,7 +176,6 @@ export async function publishPreparedPush(
 		configWithSyncState(
 			preparation.config,
 			published.manifest.files.map((file) => file.path),
-			preparation.config.pendingPackageOperations,
 		),
 	);
 	return published;
@@ -217,16 +212,11 @@ export async function preparePull(
 		agentRoot: root,
 		before,
 	});
-	const pending = pendingPackageOperationsForDesiredState({
-		agentRoot: root,
-		desired: packageSources.after,
-		pending: input.config.pendingPackageOperations,
-	});
 	return {
 		config: input.config,
 		downloadedSettings: packageSources.downloadedSettings,
 		manifest: manifestSnapshot.manifest,
-		packageOperations: packageOperationQueue({ pending, planned: packagePlan.operations }),
+		packageOperations: packagePlan.operations,
 		plan,
 		store: input.store,
 	};
@@ -287,11 +277,7 @@ export async function applyStagedPull(
 		);
 		await writeConfig(
 			agentRoot,
-			configWithSyncState(
-				staged.preparation.config,
-				staged.preparation.plan.nextManagedPaths,
-				packages.failed.length === 0 ? undefined : packages.failed,
-			),
+			configWithSyncState(staged.preparation.config, staged.preparation.plan.nextManagedPaths),
 		);
 		return { files, packages };
 	} finally {

@@ -100,6 +100,7 @@ describe('normalizeConnection', () => {
 describe('safe relative paths', () => {
 	it('accepts normal manifest paths but rejects unsafe and excluded paths', () => {
 		expect(parseManifestPath('themes/dark.json')).toBe('themes/dark.json');
+		expect(parseManifestPath('themes/.git/config')).toBe('themes/.git/config');
 		expect(parseManifestPath('auth.json')).toBe('auth.json');
 
 		for (const path of [
@@ -112,6 +113,8 @@ describe('safe relative paths', () => {
 			'npm/pkg',
 			'git/repo',
 			'pi-sync-webdav/config.json',
+			'extensions/logs/activity.json',
+			'skills/node_modules/package/index.js',
 			'themes/\u0085dark.json',
 		]) {
 			expect(() => parseManifestPath(path)).toThrow();
@@ -120,8 +123,11 @@ describe('safe relative paths', () => {
 
 	it('limits push includes to one safe top-level path', () => {
 		expect(parsePushInclude('themes')).toBe('themes');
+		expect(parsePushInclude('.git')).toBe('.git');
 		expect(() => parsePushInclude('themes/dark.json')).toThrow();
 		expect(() => parsePushInclude('npm')).toThrow();
+		expect(() => parsePushInclude('logs')).toThrow();
+		expect(() => parsePushInclude('node_modules')).toThrow();
 	});
 
 	it('encodes every remote path segment independently', () => {

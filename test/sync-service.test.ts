@@ -173,7 +173,7 @@ describe('sync service', () => {
 		await expect(readdir(getPrivatePaths(root).workspaceDirectory)).resolves.toEqual([]);
 	});
 
-	it('stages a pull, coordinates packages after files apply, and persists failed package retries', async () => {
+	it('stages a pull, coordinates packages after files apply, and does not persist failures', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
 		temporaryDirectories.push(root);
 		const { connection, store } = await createStore();
@@ -231,13 +231,23 @@ describe('sync service', () => {
 		expect(result.files).toEqual({ status: 'applied' });
 		expect(result.packages).toEqual({
 			failed: [{ action: 'install', source: 'npm:@scope/broken' }],
-			failureMessage: 'One or more Pi package operations failed',
+			failureMessage: 'One or more Pi package operations failed. Resolve them manually.',
 			succeeded: [{ action: 'install', source: 'npm:working' }],
 		});
 		expect(calls).toEqual(['install:npm:@scope/broken', 'install:npm:working']);
 		expect(await readFile(`${root}/themes/dark.txt`, 'utf8')).toBe('dark');
-		expect((await readConfig(root))?.pendingPackageOperations).toEqual([
-			{ action: 'install', source: 'npm:@scope/broken' },
-		]);
+		expect(await readConfig(root)).not.toHaveProperty('pendingPackageOperations');
+
+		const laterPreparation = await preparePull(
+			{ agentRoot: root, config: (await readConfig(root))!, store },
+			() => ({
+				packageManager: {
+					install: async (): Promise<void> => undefined,
+					remove: async (): Promise<void> => undefined,
+				},
+				settingsManager: SettingsManager.create(root, root, { projectTrusted: false }),
+			}),
+		);
+		expect(laterPreparation.packageOperations).toEqual([]);
 	});
 });

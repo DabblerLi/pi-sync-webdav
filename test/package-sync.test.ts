@@ -7,8 +7,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
 	applyPackageOperations,
 	createGlobalPackageSyncRuntime,
-	packageOperationQueue,
-	pendingPackageOperationsForDesiredState,
 	planPackageSync,
 	readGlobalPackageSources,
 } from '../src/package-sync.js';
@@ -206,43 +204,13 @@ describe('package operation execution', () => {
 
 		await expect(applyPackageOperations(packageManager, operations)).resolves.toEqual({
 			failed: [{ action: 'update', source: 'npm:broken' }],
-			failureMessage: 'One or more Pi package operations failed',
+			failureMessage: 'One or more Pi package operations failed. Resolve them manually.',
 			succeeded: [
 				{ action: 'install', source: 'npm:working' },
 				{ action: 'remove', source: 'npm:removed' },
 			],
 		});
 		expect(calls).toEqual(['install:npm:working', 'install:npm:broken', 'remove:npm:removed']);
-	});
-
-	it('retries only queue entries that still match the desired package state', () => {
-		const pending = pendingPackageOperationsForDesiredState({
-			agentRoot: '/tmp/pi-sync-webdav-package-sync',
-			desired: ['npm:theme@2.0.0', 'npm:present'],
-			pending: [
-				{ action: 'update', source: 'npm:theme@1.0.0' },
-				{ action: 'update', source: 'npm:theme@2.0.0' },
-				{ action: 'remove', source: 'npm:removed' },
-				{ action: 'remove', source: 'npm:present' },
-			],
-		});
-		expect(pending).toEqual([
-			{ action: 'update', source: 'npm:theme@2.0.0' },
-			{ action: 'remove', source: 'npm:removed' },
-		]);
-		expect(
-			packageOperationQueue({
-				pending,
-				planned: [
-					{ action: 'update', source: 'npm:theme@2.0.0' },
-					{ action: 'install', source: 'npm:new' },
-				],
-			}),
-		).toEqual([
-			{ action: 'update', source: 'npm:theme@2.0.0' },
-			{ action: 'remove', source: 'npm:removed' },
-			{ action: 'install', source: 'npm:new' },
-		]);
 	});
 
 	it('reads global package declarations through Pi SettingsManager', async () => {

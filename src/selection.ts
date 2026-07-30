@@ -4,7 +4,12 @@ import { join, resolve } from 'node:path';
 import { TextDecoder } from 'node:util';
 
 import { MAX_FILE_BYTES, MAX_OPERATION_BYTES } from './manifest.js';
-import { parseManifestPath, parsePushInclude, type SafeRelativePath } from './paths.js';
+import {
+	isPermanentlyExcluded,
+	parseManifestPath,
+	parsePushInclude,
+	type SafeRelativePath,
+} from './paths.js';
 import { readRegularFileSnapshot } from './safe-files.js';
 
 export const DEFAULT_PUSH_INCLUDES = [
@@ -262,7 +267,11 @@ export async function collectLocalSelection(input: {
 			throw new Error('Unable to list selected directory');
 		}
 		for (const name of entries.sort()) {
-			const childPath = parseManifestPath(`${relativePath}/${name}`);
+			const rawChildPath = `${relativePath}/${name}`;
+			if (isPermanentlyExcluded(rawChildPath)) {
+				continue;
+			}
+			const childPath = parseManifestPath(rawChildPath);
 			const childAbsolutePath = join(absolutePath, name);
 			let entry;
 			try {

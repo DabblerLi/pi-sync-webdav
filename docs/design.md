@@ -4,7 +4,8 @@
 
 `pi-sync-webdav` is a Pi Package for manual configuration sync over one Basic Auth WebDAV connection.
 
-- Commands: `/sync-webdav`, `setup`, `status`, `diff`, `push`, `pull`, and `restore`.
+- Commands: `/sync-webdav`, `settings`, `status`, `diff`, `push`, `pull`, and `restore`.
+- `/sync-webdav` initializes an unconfigured package; `settings` edits either the complete connection or the local push selection. Saving a connection validates it but does not start a push or pull.
 - Sync is always user initiated. There is no background sync, file watching, multi-target support, ETag/LOCK handling, remote history, or backward compatibility.
 - The plugin supports standard WebDAV operations only: `MKCOL`, `PROPFIND`, `GET`, `PUT`, and `DELETE`.
 
@@ -15,8 +16,9 @@ Private data lives under the effective Pi agent directory in `pi-sync-webdav/` a
 - Configuration and credentials use mode `0600` where supported.
 - `backups/` contains the latest local backup per affected file.
 - A local temporary workspace is used for downloads before local replacement.
-- The configuration stores one connection, the push include list, minimal sync state, and an optional pending package-operation queue containing only an action and package source.
+- The configuration stores one connection, the push include list, and minimal sync state.
 - Sync state contains only a connection fingerprint and managed relative paths. It is used to safely mirror remote deletions only for files previously managed by the same connection.
+- Saving a connection with a changed URL, remote path, or username drops sync state; changing only the password retains it.
 
 ## Remote layout
 
@@ -39,18 +41,18 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 ## Sync behavior
 
 - The local include list affects push only. Pull always applies the remote manifest.
-- Every push and pull presents one batch confirmation using file paths and add/update/delete actions.
+- Pushes and pulls with changes present one batch confirmation using file paths and add/update/delete actions.
 - Pull downloads and verifies every file before replacing local files. Local backups are created before overwrites or managed-file deletions.
 - Pull deletes only paths recorded in matching local sync state that are absent from the current manifest. First pull or a changed connection never deletes local files.
 - Cancelling or failing an operation leaves active local and remote versions intact where possible. A revision may be deleted only after verifying that the current manifest does not reference it.
 - `restore` restores local backups only.
 
-`settings.json` package declarations are applied after pull with Pi's package manager: added packages install, removed packages uninstall, and changed npm versions or Git refs update. If a package operation fails, pulled files remain and a minimal retry queue is persisted.
+`settings.json` package declarations are applied after pull with Pi's package manager: added packages install, removed packages uninstall, and changed npm versions or Git refs update. If a package operation fails, pulled files remain and Pi reports that manual action is required.
 
 ## Safety rules
 
 - Validate URLs, remote paths, manifest entries, and local targets before I/O. A remote path may have one input trailing slash but is persisted without it. Reject unsafe paths, special files, Windows absolute/drive paths, and symlink traversal.
-- `npm/`, `git/`, and the plugin private directory are never synced.
+- `npm/`, `git/`, and the plugin private directory are never synced. `logs/` and `node_modules/` are also excluded at every depth.
 - `sessions/` and `auth.json` are opt-in with extra confirmation. `auth.json` is restored with mode `0600`.
 - Selected text files receive local secret-pattern warnings. Secrets, credentials, file contents, and Authorization headers are never rendered or logged.
 - HTTPS is required by default; HTTP requires explicit confirmation. Invalid or self-signed TLS certificates are rejected.

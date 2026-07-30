@@ -9,22 +9,25 @@ import {
 	type PackageSource,
 } from '@earendil-works/pi-coding-agent';
 
-import type { PendingPackageOperation } from './config.js';
-
 interface DescribedPackageSource {
 	readonly identity: string;
 	readonly localPath: string | undefined;
 	readonly source: string;
 }
 
+export interface PackageOperation {
+	readonly action: 'install' | 'remove' | 'update';
+	readonly source: string;
+}
+
 export interface PackageSyncPlan {
-	readonly operations: readonly PendingPackageOperation[];
+	readonly operations: readonly PackageOperation[];
 }
 
 export interface PackageOperationResult {
-	readonly failed: readonly PendingPackageOperation[];
+	readonly failed: readonly PackageOperation[];
 	readonly failureMessage: string | undefined;
-	readonly succeeded: readonly PendingPackageOperation[];
+	readonly succeeded: readonly PackageOperation[];
 }
 
 export interface PackageManagerForSync {
@@ -296,7 +299,7 @@ async function assertLocalPackageSourcesExist(
 	}
 }
 
-function compareOperations(left: PendingPackageOperation, right: PendingPackageOperation): number {
+function compareOperations(left: PackageOperation, right: PackageOperation): number {
 	const actionOrder = { install: 2, remove: 0, update: 1 } as const;
 	if (left.action !== right.action) {
 		return actionOrder[left.action] - actionOrder[right.action];
@@ -332,7 +335,7 @@ export async function planPackageSync(input: {
 	const after = sourceMap(splitPackageDeclarations(input.after), input.agentRoot);
 	await assertLocalPackageSourcesExist(after);
 
-	const operations: PendingPackageOperation[] = [];
+	const operations: PackageOperation[] = [];
 	for (const [identity, previous] of before) {
 		const next = after.get(identity);
 		if (next === undefined) {
@@ -349,42 +352,12 @@ export async function planPackageSync(input: {
 	return { operations: operations.sort(compareOperations) };
 }
 
-export function pendingPackageOperationsForDesiredState(input: {
-	readonly agentRoot: string;
-	readonly desired: readonly PackageSource[] | undefined;
-	readonly pending: readonly PendingPackageOperation[] | undefined;
-}): readonly PendingPackageOperation[] {
-	const desired = sourceMap(splitPackageDeclarations(input.desired), input.agentRoot);
-	return (input.pending ?? []).filter((operation) => {
-		const pending = describePackageSource(operation.source, input.agentRoot);
-		if (operation.action === 'remove') {
-			return !desired.has(pending.identity);
-		}
-		return desired.get(pending.identity)?.source === operation.source;
-	});
-}
-
-export function packageOperationQueue(input: {
-	readonly pending: readonly PendingPackageOperation[];
-	readonly planned: readonly PendingPackageOperation[];
-}): readonly PendingPackageOperation[] {
-	const seen = new Set<string>();
-	return [...input.pending, ...input.planned].filter((operation) => {
-		const key = `${operation.action}\u0000${operation.source}`;
-		if (seen.has(key)) {
-			return false;
-		}
-		seen.add(key);
-		return true;
-	});
-}
-
 export async function applyPackageOperations(
 	packageManager: PackageManagerForSync,
-	operations: readonly PendingPackageOperation[],
+	operations: readonly PackageOperation[],
 ): Promise<PackageOperationResult> {
-	const failed: PendingPackageOperation[] = [];
-	const succeeded: PendingPackageOperation[] = [];
+	const failed: PackageOperation[] = [];
+	const succeeded: PackageOperation[] = [];
 	for (const operation of operations) {
 		try {
 			if (operation.action === 'remove') {
@@ -400,7 +373,10 @@ export async function applyPackageOperations(
 	}
 	return {
 		failed,
-		failureMessage: failed.length === 0 ? undefined : 'One or more Pi package operations failed',
+		failureMessage:
+			failed.length === 0
+				? undefined
+				: 'One or more Pi package operations failed. Resolve them manually.',
 		succeeded,
 	};
 }

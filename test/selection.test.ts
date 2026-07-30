@@ -29,6 +29,8 @@ describe('selection candidates', () => {
 		await writeFile(join(root, 'custom.txt'), 'custom', 'utf8');
 		await mkdir(join(root, 'npm'));
 		await mkdir(join(root, 'git'));
+		await mkdir(join(root, 'logs'));
+		await mkdir(join(root, 'node_modules'));
 		await mkdir(join(root, 'pi-sync-webdav'));
 		await symlink(root, join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
 
@@ -60,6 +62,8 @@ describe('selection candidates', () => {
 		expect(byPath.has(parsePushInclude('custom.txt'))).toBe(true);
 		expect([...byPath.keys()].map(String)).not.toContain('npm');
 		expect([...byPath.keys()].map(String)).not.toContain('git');
+		expect([...byPath.keys()].map(String)).not.toContain('logs');
+		expect([...byPath.keys()].map(String)).not.toContain('node_modules');
 		expect([...byPath.keys()].map(String)).not.toContain('pi-sync-webdav');
 		expect([...byPath.keys()].map(String)).not.toContain('linked');
 	});
@@ -77,6 +81,16 @@ describe('local selection collection', () => {
 			'utf8',
 		);
 		await writeFile(join(root, 'themes', 'binary.bin'), Buffer.from([0, 1, 2]));
+		await mkdir(join(root, 'themes', '.git'));
+		await writeFile(join(root, 'themes', '.git', 'HEAD'), 'ref: refs/heads/main\n', 'utf8');
+		await mkdir(join(root, 'themes', 'logs'));
+		await writeFile(join(root, 'themes', 'logs', 'activity.txt'), 'log', 'utf8');
+		await mkdir(join(root, 'themes', 'node_modules', 'package'), { recursive: true });
+		await writeFile(
+			join(root, 'themes', 'node_modules', 'package', 'index.js'),
+			'export default {}',
+			'utf8',
+		);
 		await symlink(
 			root,
 			join(root, 'themes', 'linked-root'),
@@ -90,6 +104,7 @@ describe('local selection collection', () => {
 
 		expect(selection.files.map((file) => file.path)).toEqual([
 			'settings.json',
+			'themes/.git/HEAD',
 			'themes/binary.bin',
 			'themes/secret.txt',
 		]);

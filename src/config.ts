@@ -20,20 +20,12 @@ export interface SyncState {
 	readonly managedPaths: readonly SafeRelativePath[];
 }
 
-export type PendingPackageAction = 'install' | 'remove' | 'update';
-
-export interface PendingPackageOperation {
-	readonly action: PendingPackageAction;
-	readonly source: string;
-}
-
 export interface StoredConnection extends NormalizedConnection {
 	readonly readOnly: boolean;
 }
 
 export interface PluginConfig {
 	readonly connection: StoredConnection;
-	readonly pendingPackageOperations?: readonly PendingPackageOperation[];
 	readonly pushInclude: readonly SafeRelativePath[];
 	readonly syncState?: SyncState;
 	readonly version: typeof CONFIG_VERSION;
@@ -120,93 +112,6 @@ function parseUniquePaths(
 	return paths;
 }
 
-function hasControlCharacters(value: string): boolean {
-	for (const character of value) {
-		const codePoint = character.codePointAt(0);
-		if (
-			codePoint !== undefined &&
-			(codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f))
-		) {
-			return true;
-		}
-	}
-	return false;
-}
-
-function hasEmbeddedPackageCredentials(source: string): boolean {
-	if (source.startsWith('npm:')) {
-		const spec = source.slice('npm:'.length);
-		if (spec.includes('?') || spec.includes('#')) {
-			return true;
-		}
-		const urlMatch = /https?:\/\//iu.exec(spec);
-		if (urlMatch === null || urlMatch.index === undefined) {
-			return false;
-		}
-		try {
-			const url = new URL(spec.slice(urlMatch.index));
-			return url.username.length > 0 || url.password.length > 0 || url.search.length > 0;
-		} catch {
-			return false;
-		}
-	}
-	const raw =
-		source.startsWith('git:') && !source.startsWith('git://')
-			? source.slice('git:'.length)
-			: source;
-	if (!raw.includes('://')) {
-		const scpMatch = raw.match(/^git@([^:]+):.+$/u);
-		if (scpMatch !== null) {
-			return scpMatch[1]?.includes('@') ?? true;
-		}
-		const separator = raw.indexOf('/');
-		return separator > 0 && raw.slice(0, separator).includes('@');
-	}
-	try {
-		const url = new URL(raw);
-		return (
-			url.password.length > 0 ||
-			url.search.length > 0 ||
-			url.hash.length > 0 ||
-			(url.username.length > 0 && !(url.protocol === 'ssh:' && url.username === 'git'))
-		);
-	} catch {
-		return false;
-	}
-}
-
-function parsePendingPackageOperations(value: unknown): readonly PendingPackageOperation[] {
-	if (!Array.isArray(value) || value.length === 0) {
-		invalidConfig();
-	}
-
-	const operations = value.map((operation): PendingPackageOperation => {
-		if (!isRecord(operation)) {
-			invalidConfig();
-		}
-		assertExactKeys(operation, ['action', 'source']);
-		if (
-			(operation.action !== 'install' &&
-				operation.action !== 'remove' &&
-				operation.action !== 'update') ||
-			typeof operation.source !== 'string' ||
-			operation.source.length === 0 ||
-			hasControlCharacters(operation.source) ||
-			hasEmbeddedPackageCredentials(operation.source)
-		) {
-			invalidConfig();
-		}
-		return { action: operation.action, source: operation.source };
-	});
-	if (
-		new Set(operations.map((operation) => `${operation.action}\u0000${operation.source}`)).size !==
-		operations.length
-	) {
-		invalidConfig();
-	}
-	return operations;
-}
-
 function parseSyncState(value: unknown): SyncState {
 	if (!isRecord(value)) {
 		invalidConfig();
@@ -231,21 +136,14 @@ function validatePluginConfig(value: unknown, allowDerivedConnectionFields = fal
 	if (Object.hasOwn(value, 'syncState')) {
 		expectedKeys.push('syncState');
 	}
-	if (Object.hasOwn(value, 'pendingPackageOperations')) {
-		expectedKeys.push('pendingPackageOperations');
-	}
 	assertExactKeys(value, expectedKeys);
 	if (value.version !== CONFIG_VERSION) {
 		invalidConfig();
 	}
 
 	const syncState = Object.hasOwn(value, 'syncState') ? parseSyncState(value.syncState) : undefined;
-	const pendingPackageOperations = Object.hasOwn(value, 'pendingPackageOperations')
-		? parsePendingPackageOperations(value.pendingPackageOperations)
-		: undefined;
 	return {
 		connection: parseConnection(value.connection, allowDerivedConnectionFields),
-		...(pendingPackageOperations === undefined ? {} : { pendingPackageOperations }),
 		pushInclude: parseUniquePaths(value.pushInclude, parsePushInclude),
 		...(syncState === undefined ? {} : { syncState }),
 		version: CONFIG_VERSION,
@@ -264,9 +162,6 @@ function serializeConfig(config: PluginConfig): string {
 		},
 		pushInclude: validated.pushInclude,
 		...(validated.syncState === undefined ? {} : { syncState: validated.syncState }),
-		...(validated.pendingPackageOperations === undefined
-			? {}
-			: { pendingPackageOperations: validated.pendingPackageOperations }),
 		version: validated.version,
 	};
 	return `${JSON.stringify(persistedConfig, null, 2)}\n`;

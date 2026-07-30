@@ -1,7 +1,7 @@
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Key, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
 
-import type { PendingPackageOperation } from './config.js';
+import type { PackageOperation } from './package-sync.js';
 import type { SafeRelativePath } from './paths.js';
 import type { SelectionCandidate } from './selection.js';
 import type { FileMutation } from './sync-plan.js';
@@ -12,7 +12,7 @@ function actionLabel(action: FileMutation['action']): string {
 
 export function formatPlanLines(input: {
 	readonly files: readonly Pick<FileMutation, 'action' | 'path'>[];
-	readonly packages?: readonly PendingPackageOperation[];
+	readonly packages?: readonly PackageOperation[];
 	readonly warnings?: readonly string[];
 }): readonly string[] {
 	return [

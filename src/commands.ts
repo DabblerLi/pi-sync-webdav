@@ -7,7 +7,7 @@ import {
 
 import { connectionFingerprint, readConfig, writeConfig, type PluginConfig } from './config.js';
 import { applyRestorePlan, listBackups, planRestore } from './local-transaction.js';
-import { parseRemotePath, normalizeConnection } from './paths.js';
+import { parseRemotePath, normalizeConnection, type NormalizedConnection } from './paths.js';
 import { RemoteStore } from './remote-store.js';
 import { promptSecret } from './secret-input.js';
 import {
@@ -28,7 +28,9 @@ import { planPush } from './sync-plan.js';
 import { createWebDavGateway } from './webdav.js';
 import { confirmSyncPlan, formatPlanLines, selectPushIncludes } from './ui.js';
 
-const SUBCOMMANDS = ['setup', 'status', 'diff', 'push', 'pull', 'restore'] as const;
+const SUBCOMMANDS = ['settings', 'status', 'diff', 'push', 'pull', 'restore'] as const;
+const SETTINGS_OPTIONS = ['Connection', 'Push selection', 'Cancel'] as const;
+const PASSWORD_OPTIONS = ['Keep current password', 'Change password', 'Cancel'] as const;
 
 type SyncWebdavSubcommand = (typeof SUBCOMMANDS)[number] | 'dashboard';
 
@@ -48,7 +50,7 @@ function userVisibleError(error: unknown): string {
 function isMutatingCommand(command: SyncWebdavSubcommand): boolean {
 	return (
 		command === 'dashboard' ||
-		command === 'setup' ||
+		command === 'settings' ||
 		command === 'push' ||
 		command === 'pull' ||
 		command === 'restore'
@@ -94,40 +96,50 @@ async function confirmOptionalPaths(
 	return true;
 }
 
-async function runSetup(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
-	const existing = await readConfig(agentRoot);
+async function promptConnection(
+	ctx: ExtensionCommandContext,
+	existing: PluginConfig | undefined,
+): Promise<NormalizedConnection | undefined> {
 	const url = await ctx.ui.input('WebDAV URL', existing?.connection.url);
 	if (url === undefined) {
-		return;
+		return undefined;
 	}
 	const remotePath = await ctx.ui.input(
 		'Remote path',
 		existing?.connection.remotePath ?? 'pi-sync-webdav/',
 	);
 	if (remotePath === undefined) {
-		return;
+		return undefined;
 	}
 	const username = await ctx.ui.input('Username', existing?.connection.username);
 	if (username === undefined) {
-		return;
+		return undefined;
 	}
-	const password = await promptSecret(ctx, 'WebDAV password');
-	if (password === undefined) {
-		return;
+
+	let password: string;
+	if (existing === undefined) {
+		const enteredPassword = await promptSecret(ctx, 'WebDAV password');
+		if (enteredPassword === undefined) {
+			return undefined;
+		}
+		password = enteredPassword;
+	} else {
+		const choice = await ctx.ui.select('WebDAV password', [...PASSWORD_OPTIONS]);
+		if (choice === undefined || choice === 'Cancel') {
+			return undefined;
+		}
+		if (choice === 'Keep current password') {
+			password = existing.connection.password;
+		} else {
+			const enteredPassword = await promptSecret(ctx, 'WebDAV password');
+			if (enteredPassword === undefined) {
+				return undefined;
+			}
+			password = enteredPassword;
+		}
 	}
+
 	const connection = normalizeConnection({ password, remotePath, url, username });
-	const candidates = await listSelectionCandidates(agentRoot);
-	const pushInclude = await selectPushIncludes(
-		ctx,
-		candidates,
-		existing?.pushInclude ?? DEFAULT_PUSH_INCLUDES,
-	);
-	if (pushInclude === undefined) {
-		return;
-	}
-	if (!(await confirmOptionalPaths(ctx, pushInclude))) {
-		return;
-	}
 	if (
 		connection.requiresInsecureTransportConfirmation &&
 		!(await ctx.ui.confirm(
@@ -135,9 +147,18 @@ async function runSetup(ctx: ExtensionCommandContext, agentRoot: string): Promis
 			'HTTP sends WebDAV credentials without transport encryption. Continue?',
 		))
 	) {
-		return;
+		return undefined;
 	}
+	return connection;
+}
 
+async function saveConnection(
+	ctx: ExtensionCommandContext,
+	agentRoot: string,
+	existing: PluginConfig | undefined,
+	connection: NormalizedConnection,
+	pushInclude: PluginConfig['pushInclude'],
+): Promise<PluginConfig> {
 	const store = new RemoteStore(
 		createWebDavGateway(connection),
 		parseRemotePath(connection.remotePath),
@@ -150,23 +171,69 @@ async function runSetup(ctx: ExtensionCommandContext, agentRoot: string): Promis
 	const sameConnection =
 		existing !== undefined &&
 		connectionFingerprint(existing.connection) === connectionFingerprint(connection);
-	await writeConfig(agentRoot, {
+	const config: PluginConfig = {
 		connection: { ...connection, readOnly: !writeCapability.canWrite },
-		...(existing?.pendingPackageOperations === undefined
-			? {}
-			: { pendingPackageOperations: existing.pendingPackageOperations }),
 		pushInclude,
-		...(sameConnection && existing?.syncState !== undefined
+		...(sameConnection && existing.syncState !== undefined
 			? { syncState: existing.syncState }
 			: {}),
 		version: 1,
-	});
+	};
+	await writeConfig(agentRoot, config);
 	ctx.ui.notify(
 		writeCapability.canWrite
 			? 'WebDAV connection saved.'
 			: 'WebDAV connection saved in read-only mode.',
 		writeCapability.canWrite ? 'info' : 'warning',
 	);
+	return config;
+}
+
+async function runInitialConfiguration(
+	ctx: ExtensionCommandContext,
+	agentRoot: string,
+): Promise<void> {
+	const connection = await promptConnection(ctx, undefined);
+	if (connection === undefined) {
+		return;
+	}
+	const candidates = await listSelectionCandidates(agentRoot);
+	const pushInclude = await selectPushIncludes(ctx, candidates, DEFAULT_PUSH_INCLUDES);
+	if (pushInclude === undefined || !(await confirmOptionalPaths(ctx, pushInclude))) {
+		return;
+	}
+	await saveConnection(ctx, agentRoot, undefined, connection, pushInclude);
+}
+
+async function runSettings(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
+	let config = await readConfig(agentRoot);
+	if (config === undefined) {
+		await runInitialConfiguration(ctx, agentRoot);
+		return;
+	}
+
+	while (true) {
+		const choice = await ctx.ui.select('WebDAV sync settings', [...SETTINGS_OPTIONS]);
+		if (choice === undefined || choice === 'Cancel') {
+			return;
+		}
+		if (choice === 'Connection') {
+			const connection = await promptConnection(ctx, config);
+			if (connection !== undefined) {
+				config = await saveConnection(ctx, agentRoot, config, connection, config.pushInclude);
+			}
+			continue;
+		}
+
+		const candidates = await listSelectionCandidates(agentRoot);
+		const pushInclude = await selectPushIncludes(ctx, candidates, config.pushInclude);
+		if (pushInclude === undefined || !(await confirmOptionalPaths(ctx, pushInclude))) {
+			continue;
+		}
+		config = { ...config, pushInclude };
+		await writeConfig(agentRoot, config);
+		ctx.ui.notify('Push selection saved.', 'info');
+	}
 }
 
 async function runStatus(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
@@ -390,7 +457,7 @@ async function runRestore(ctx: ExtensionCommandContext, agentRoot: string): Prom
 async function runDashboard(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
 	const config = await readConfig(agentRoot);
 	if (config === undefined) {
-		await runSetup(ctx, agentRoot);
+		await runSettings(ctx, agentRoot);
 		return;
 	}
 	const options = SUBCOMMANDS.filter(
@@ -416,8 +483,8 @@ async function runCommand(
 		case 'dashboard':
 			await runDashboard(ctx, agentRoot);
 			return;
-		case 'setup':
-			await runSetup(ctx, agentRoot);
+		case 'settings':
+			await runSettings(ctx, agentRoot);
 			return;
 		case 'status':
 			await runStatus(ctx, agentRoot);
@@ -462,7 +529,7 @@ export function registerSyncWebdavCommands(
 		handler: async (args, ctx) => {
 			const command = parseSyncWebdavCommand(args);
 			if (command === undefined) {
-				ctx.ui.notify('Usage: /sync-webdav [setup|status|diff|push|pull|restore]', 'error');
+				ctx.ui.notify('Usage: /sync-webdav [settings|status|diff|push|pull|restore]', 'error');
 				return;
 			}
 			try {

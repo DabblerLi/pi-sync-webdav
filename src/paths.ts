@@ -14,6 +14,7 @@ export const CONFIG_FILE_NAME = 'config.json';
 
 const DRIVE_PREFIX_PATTERN = /^[a-zA-Z]:/u;
 const PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES = new Set(['npm', 'git', PRIVATE_DIRECTORY_NAME]);
+const RECURSIVELY_EXCLUDED_NAMES = new Set(['logs', 'node_modules']);
 
 export interface ConnectionInput {
 	readonly password: string;
@@ -223,7 +224,7 @@ export function normalizeConnection(input: ConnectionInput): NormalizedConnectio
 
 export function parseManifestPath(value: unknown): SafeRelativePath {
 	const path = parseLogicalRelativePath(value, 'Invalid manifest path');
-	if (PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES.has(path.split('/')[0] ?? '')) {
+	if (isPermanentlyExcluded(path)) {
 		throw new Error('Invalid manifest path');
 	}
 	return path as SafeRelativePath;
@@ -231,14 +232,18 @@ export function parseManifestPath(value: unknown): SafeRelativePath {
 
 export function parsePushInclude(value: unknown): SafeRelativePath {
 	const path = parseLogicalRelativePath(value, 'Invalid push include');
-	if (path.includes('/') || PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES.has(path)) {
+	if (path.includes('/') || isPermanentlyExcluded(path)) {
 		throw new Error('Invalid push include');
 	}
 	return path as SafeRelativePath;
 }
 
-export function isPermanentlyExcluded(path: SafeRelativePath): boolean {
-	return PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES.has(path.split('/')[0] ?? '');
+export function isPermanentlyExcluded(path: string): boolean {
+	const components = path.split('/');
+	return (
+		PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES.has(components[0] ?? '') ||
+		components.some((component) => RECURSIVELY_EXCLUDED_NAMES.has(component))
+	);
 }
 
 export function encodeRemotePath(path: RemotePath | SafeRelativePath): string {

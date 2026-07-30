@@ -7,11 +7,11 @@ Read `docs/design.md` before changing implementation code. Treat the following a
 - The package currently supports one manually initiated Basic Auth WebDAV target.
 - Pushes publish a complete new revision and activate it through `manifest.json`.
 - Local backups, safe pull deletion based on matching `syncState`, path validation, and symlink protection are part of the current safety model.
-- `npm/`, `git/`, and `pi-sync-webdav/` are excluded from synchronization under the current design.
+- `npm/`, `git/`, and `pi-sync-webdav/` are excluded from synchronization under the current design. `logs/` and `node_modules/` directories are also excluded at every depth.
 
 ## Implementation expectations
 
-- Keep credentials and secret matches out of UI, errors, logs, manifests, and pending package operations. Reject credential-bearing package sources before display or persistence.
+- Keep credentials and secret matches out of UI, errors, logs, and manifests. Reject credential-bearing package sources before display or persistence.
 - Keep `status` and `diff` read-only. Pull cancellation should clean its private workspace.
 - Reconcile `settings.packages` through Pi's exported `SettingsManager` and `DefaultPackageManager`.
 - Add focused Vitest coverage for behavior, failures, and cancellation paths.
