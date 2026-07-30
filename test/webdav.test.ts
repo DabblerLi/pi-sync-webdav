@@ -1,0 +1,139 @@
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { normalizeConnection, parseRemotePath } from '../src/paths.js';
+import { createWebDavGateway, WebDavRequestError } from '../src/webdav.js';
+import { MockWebDavServer } from './mock-webdav-server.js';
+
+const servers: MockWebDavServer[] = [];
+
+afterEach(async () => {
+	await Promise.all(servers.splice(0).map((server) => server.close()));
+});
+
+async function createGateway() {
+	const server = await MockWebDavServer.create();
+	servers.push(server);
+	const gateway = createWebDavGateway(
+		normalizeConnection({
+			password: 'password',
+			remotePath: 'pi-sync-webdav',
+			url: server.baseUrl,
+			username: 'alice',
+		}),
+		{ requestTimeoutMs: 1_000, retryDelaysMs: [0, 0] },
+	);
+	return { gateway, server };
+}
+
+describe('WebDAV gateway', () => {
+	it('uses Basic Auth and supports the required WebDAV operations', async () => {
+		const { gateway, server } = await createGateway();
+		const root = parseRemotePath('pi-sync-webdav');
+		const file = parseRemotePath('pi-sync-webdav/a b#.txt');
+
+		await gateway.createDirectory(root);
+		expect(await gateway.exists(root)).toBe(true);
+		await gateway.writeFile(file, Buffer.from('contents', 'utf8'));
+		expect(await gateway.readFile(file)).toEqual(Buffer.from('contents', 'utf8'));
+		expect(await gateway.directoryContents(root)).toEqual([{ basename: 'a b#.txt', type: 'file' }]);
+		await gateway.deletePath(file);
+		await gateway.deletePath(root);
+		expect(await gateway.exists(root)).toBe(false);
+		expect(server.requests).toContainEqual({
+			method: 'PUT',
+			pathname: '/dav/pi-sync-webdav/a%20b%23.txt',
+		});
+	});
+
+	it('retries temporary server failures without exposing credentials', async () => {
+		const { gateway, server } = await createGateway();
+		const root = parseRemotePath('pi-sync-webdav');
+		const file = parseRemotePath('pi-sync-webdav/retry.txt');
+		await gateway.createDirectory(root);
+		await gateway.writeFile(file, Buffer.from('retry', 'utf8'));
+		server.failNext('GET', 'pi-sync-webdav/retry.txt', 503);
+
+		await expect(gateway.readFile(file)).resolves.toEqual(Buffer.from('retry', 'utf8'));
+		expect(server.requests.filter((request) => request.method === 'GET')).toHaveLength(2);
+	});
+
+	it('retries rate limits and timed-out requests', async () => {
+		const { gateway: setupGateway, server } = await createGateway();
+		const root = parseRemotePath('pi-sync-webdav');
+		const file = parseRemotePath('pi-sync-webdav/retry-timeout.txt');
+		await setupGateway.createDirectory(root);
+		await setupGateway.writeFile(file, Buffer.from('retry', 'utf8'));
+		const gateway = createWebDavGateway(
+			normalizeConnection({
+				password: 'password',
+				remotePath: 'pi-sync-webdav',
+				url: server.baseUrl,
+				username: 'alice',
+			}),
+			{ requestTimeoutMs: 10, retryDelaysMs: [0, 0] },
+		);
+		server.failNext('GET', 'pi-sync-webdav/retry-timeout.txt', 429);
+		server.delayNext('GET', 'pi-sync-webdav/retry-timeout.txt', 50);
+
+		await expect(gateway.readFile(file)).resolves.toEqual(Buffer.from('retry', 'utf8'));
+		expect(server.requests.filter((request) => request.method === 'GET')).toHaveLength(3);
+	});
+
+	it('bounds successful/error responses and redacts authentication failures', async () => {
+		const { gateway, server } = await createGateway();
+		const root = parseRemotePath('pi-sync-webdav');
+		const file = parseRemotePath('pi-sync-webdav/large.txt');
+		await gateway.createDirectory(root);
+		await gateway.writeFile(file, Buffer.from('large', 'utf8'));
+		const limitedGateway = createWebDavGateway(
+			normalizeConnection({
+				password: 'password',
+				remotePath: 'pi-sync-webdav',
+				url: server.baseUrl,
+				username: 'alice',
+			}),
+			{ maxResponseBytes: 4, retryDelaysMs: [] },
+		);
+		const noRetryGateway = createWebDavGateway(
+			normalizeConnection({
+				password: 'password',
+				remotePath: 'pi-sync-webdav',
+				url: server.baseUrl,
+				username: 'alice',
+			}),
+			{ retryDelaysMs: [] },
+		);
+		const unauthorizedGateway = createWebDavGateway(
+			normalizeConnection({
+				password: 'wrong-password',
+				remotePath: 'pi-sync-webdav',
+				url: server.baseUrl,
+				username: 'alice',
+			}),
+			{ retryDelaysMs: [] },
+		);
+
+		await expect(limitedGateway.readFile(file)).rejects.toThrow(
+			'WebDAV response exceeds the size limit',
+		);
+		server.failNext(
+			'GET',
+			'pi-sync-webdav/large.txt',
+			500,
+			1,
+			'Authorization: Basic YWxpY2U6cGFzc3dvcmQ= password \u0000'.repeat(4_096),
+		);
+		const error = await noRetryGateway
+			.readFile(file)
+			.catch((requestError: unknown) => requestError);
+		expect(error).toBeInstanceOf(WebDavRequestError);
+		expect((error as Error).message).toBe('WebDAV request failed with HTTP status 500');
+		expect((error as Error).message).not.toContain('Authorization');
+		expect((error as Error).message).not.toContain('password');
+		await expect(unauthorizedGateway.exists(root)).rejects.toMatchObject({
+			message: 'WebDAV authentication failed',
+			status: 401,
+		});
+		await expect(unauthorizedGateway.exists(root)).rejects.toBeInstanceOf(WebDavRequestError);
+	});
+});

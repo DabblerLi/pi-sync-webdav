@@ -128,6 +128,10 @@ function normalizeRemotePath(value: unknown): RemotePath {
 	return parseLogicalRelativePath(value, 'Invalid remote path', true) as RemotePath;
 }
 
+export function parseRemotePath(value: unknown): RemotePath {
+	return parseLogicalRelativePath(value, 'Invalid remote path') as RemotePath;
+}
+
 function resolveAgentRoot(agentRoot: string): string {
 	assertNonEmptyString(agentRoot, 'Invalid Pi agent directory');
 	return resolve(agentRoot);
@@ -238,7 +242,7 @@ export function isPermanentlyExcluded(path: SafeRelativePath): boolean {
 }
 
 export function encodeRemotePath(path: RemotePath | SafeRelativePath): string {
-	const canonical = parseLogicalRelativePath(path, 'Invalid remote path');
+	const canonical = parseRemotePath(path);
 	return canonical
 		.split('/')
 		.map((segment) => encodeURIComponent(segment))
