@@ -25,7 +25,6 @@ describe('selection candidates', () => {
 		await writeFile(join(root, 'settings.json'), '{}', 'utf8');
 		await mkdir(join(root, 'themes'));
 		await writeFile(join(root, 'auth.json'), '{}', 'utf8');
-		await mkdir(join(root, 'sessions'));
 		await writeFile(join(root, 'custom.txt'), 'custom', 'utf8');
 		await mkdir(join(root, 'npm'));
 		await mkdir(join(root, 'git'));
@@ -58,7 +57,10 @@ describe('selection candidates', () => {
 			type: 'missing',
 		});
 		expect(byPath.get(parsePushInclude('auth.json'))).toMatchObject({ defaultSelected: false });
-		expect(byPath.get(parsePushInclude('sessions'))).toMatchObject({ defaultSelected: false });
+		expect(byPath.get(parsePushInclude('sessions'))).toMatchObject({
+			defaultSelected: false,
+			type: 'missing',
+		});
 		expect(byPath.has(parsePushInclude('custom.txt'))).toBe(true);
 		expect([...byPath.keys()].map(String)).not.toContain('npm');
 		expect([...byPath.keys()].map(String)).not.toContain('git');
@@ -113,6 +115,22 @@ describe('local selection collection', () => {
 		expect(selection.totalBytes).toBe(
 			selection.files.reduce((total, file) => total + file.contents.byteLength, 0),
 		);
+	});
+
+	it('stops selection before scanning when cancelled', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-selection-');
+		temporaryDirectories.push(root);
+		await writeFile(join(root, 'settings.json'), '{}', 'utf8');
+		const controller = new AbortController();
+		controller.abort();
+
+		await expect(
+			collectLocalSelection({
+				agentRoot: root,
+				includes: [parsePushInclude('settings.json')],
+				operation: { signal: controller.signal },
+			}),
+		).rejects.toThrow('Sync operation cancelled');
 	});
 
 	it('does not mutate auth.json permissions during a read-only selection', async () => {

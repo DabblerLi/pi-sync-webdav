@@ -120,6 +120,16 @@ describe('manifest validation', () => {
 				{ path: 'skills/tool/node_modules/package/index.js', sha256: 'a'.repeat(64), size: 1 },
 			],
 		},
+		{
+			version: 1,
+			revision: generateRevisionId(),
+			files: [{ path: 'themes/CON.json', sha256: 'a'.repeat(64), size: 1 }],
+		},
+		{
+			version: 1,
+			revision: generateRevisionId(),
+			files: [{ path: 'themes/settings:stream', sha256: 'a'.repeat(64), size: 1 }],
+		},
 	])('rejects invalid manifests', (manifest) => {
 		expect(() => validateManifest(manifest)).toThrow('Invalid manifest');
 	});

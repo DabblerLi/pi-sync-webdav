@@ -173,6 +173,86 @@ describe('sync service', () => {
 		await expect(readdir(getPrivatePaths(root).workspaceDirectory)).resolves.toEqual([]);
 	});
 
+	it('rejects credential-bearing hosted package sources before pull confirmation or local writes', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
+		temporaryDirectories.push(root);
+		const { connection, store } = await createStore();
+		const config = pluginConfig(connection);
+		await writeFile(`${root}/settings.json`, '{"theme":"local"}', 'utf8');
+		await writeConfig(root, config);
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{
+					contents: Buffer.from(
+						'{"packages":["git:github:acme/plugin?access_token=private"]}',
+						'utf8',
+					),
+					path: parseManifestPath('settings.json'),
+				},
+			],
+		});
+
+		const preparation = preparePull({ agentRoot: root, config, store });
+		await expect(preparation).rejects.toThrow('Invalid Pi package source');
+		await preparation.catch((error: unknown) => {
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).not.toContain('access_token');
+		});
+		expect(await readFile(`${root}/settings.json`, 'utf8')).toBe('{"theme":"local"}');
+		expect((await readConfig(root))?.syncState).toBeUndefined();
+	});
+
+	it('does not persist sync state when cancellation occurs during package reconciliation', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
+		temporaryDirectories.push(root);
+		const { connection, store } = await createStore();
+		const config = pluginConfig(connection);
+		await writeFile(`${root}/settings.json`, '{}', 'utf8');
+		await writeConfig(root, config);
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{
+					contents: Buffer.from('{"packages":["npm:first","npm:second"]}', 'utf8'),
+					path: parseManifestPath('settings.json'),
+				},
+			],
+		});
+		const controller = new AbortController();
+		const calls: string[] = [];
+		const packageRuntimeFactory: PackageRuntimeFactory = () => ({
+			packageManager: {
+				install: async (source: string): Promise<void> => {
+					calls.push(source);
+					controller.abort();
+				},
+				remove: async (): Promise<void> => undefined,
+			},
+			settingsManager: SettingsManager.inMemory(),
+		});
+		const preparation = await preparePull(
+			{ agentRoot: root, config, store },
+			packageRuntimeFactory,
+		);
+
+		await expect(
+			applyStagedPull(root, await stagePreparedPull(root, preparation), packageRuntimeFactory, {
+				signal: controller.signal,
+			}),
+		).resolves.toMatchObject({
+			cancelled: true,
+			packages: {
+				cancelled: true,
+				failureMessage: 'One or more Pi package operations failed. Resolve them manually.',
+			},
+		});
+		expect(calls).toEqual(['npm:first']);
+		expect((await readConfig(root))?.syncState).toBeUndefined();
+	});
+
 	it('stages a pull, coordinates packages after files apply, and does not persist failures', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
 		temporaryDirectories.push(root);

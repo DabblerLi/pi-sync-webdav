@@ -5,7 +5,7 @@
 `pi-sync-webdav` is a Pi Package for manual configuration sync over one Basic Auth WebDAV connection.
 
 - Commands: `/sync-webdav`, `settings`, `status`, `diff`, `push`, `pull`, and `restore`.
-- `/sync-webdav` initializes an unconfigured package; `settings` edits either the complete connection or the local push selection. Saving a connection validates it but does not start a push or pull.
+- `/sync-webdav` initializes an unconfigured package; otherwise its dashboard offers the commands and manual remote-residue cleanup. `settings` edits either the complete connection or the local push selection. Saving a connection validates independent read access and write capability but does not start a push or pull.
 - Sync is always user initiated. There is no background sync, file watching, multi-target support, ETag/LOCK handling, remote history, or backward compatibility.
 - The plugin supports standard WebDAV operations only: `MKCOL`, `PROPFIND`, `GET`, `PUT`, and `DELETE`.
 
@@ -13,7 +13,7 @@
 
 Private data lives under the effective Pi agent directory in `pi-sync-webdav/` and is never synced.
 
-- Configuration and credentials use mode `0600` where supported.
+- Configuration and credentials use mode `0600` where supported. A pull repairs `auth.json` to mode `0600` where supported even when its contents are unchanged.
 - `backups/` contains the latest local backup per affected file.
 - A local temporary workspace is used for downloads before local replacement.
 - The configuration stores one connection, the push include list, and minimal sync state.
@@ -34,28 +34,29 @@ The user-configured remote path is an exclusive plugin root:
 
 `manifest.json` contains the current format version, one lowercase UUID-v4 revision ID, and each file's relative path, SHA-256, and size.
 
-A push uploads a complete new revision, rechecks the current manifest hash, and writes `manifest.json` last. A revision is not active until referenced by the manifest. After a verified commit, the previous current-format revision is removed. There is no remote restore history.
+A push uploads a complete new revision, rechecks the current manifest hash, and writes `manifest.json` last. A revision is not active until referenced by the manifest. After a verified commit, the previous current-format revision is removed. Failed cleanup or uncertain activation is surfaced in the current interaction. Dashboard cleanup revalidates the manifest before deleting only recognized inactive plugin residue; unknown items are retained. There is no remote restore history or persistent operation history.
 
 If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. Push can overwrite it only after an explicit risk confirmation and never migrates or deletes its legacy data.
 
 ## Sync behavior
 
 - The local include list affects push only. Pull always applies the remote manifest.
-- Pushes and pulls with changes present one batch confirmation using file paths and add/update/delete actions.
+- Pushes and pulls with changes present one batch confirmation using file paths and add/update/delete actions. A permission-only `SECURE auth.json` action is also confirmed.
 - Pull downloads and verifies every file before replacing local files. Local backups are created before overwrites or managed-file deletions.
 - Pull deletes only paths recorded in matching local sync state that are absent from the current manifest. First pull or a changed connection never deletes local files.
+- Interactive connection validation, push, pull, restore, and dashboard cleanup report safe phase and retry progress. Esc requests cancellation at supported network and file boundaries; staging cleanup and remote commit verification complete before the interaction finishes.
 - Cancelling or failing an operation leaves active local and remote versions intact where possible. A revision may be deleted only after verifying that the current manifest does not reference it.
 - `restore` restores local backups only.
 
-`settings.json` package declarations are applied after pull with Pi's package manager: added packages install, removed packages uninstall, and changed npm versions or Git refs update. If a package operation fails, pulled files remain and Pi reports that manual action is required.
+`settings.json` package declarations are applied after pull with Pi's package manager: added packages install, removed packages uninstall, and changed npm versions or Git refs update. If a package operation fails or cancellation interrupts reconciliation, pulled files remain, `syncState` is not persisted, and Pi reports that manual action is required.
 
 ## Safety rules
 
-- Validate URLs, remote paths, manifest entries, and local targets before I/O. A remote path may have one input trailing slash but is persisted without it. Reject unsafe paths, special files, Windows absolute/drive paths, and symlink traversal.
+- Validate URLs, remote paths, manifest entries, and local targets before I/O. A remote path may have one input trailing slash but is persisted without it. Reject unsafe paths, special files, Windows absolute/drive paths, device names, alternate data streams, trailing dots or spaces, symlink traversal, and case-folding destination collisions.
 - `npm/`, `git/`, and the plugin private directory are never synced. `logs/` and `node_modules/` are also excluded at every depth.
 - `sessions/` and `auth.json` are opt-in with extra confirmation. `auth.json` is restored with mode `0600`.
 - Selected text files receive local secret-pattern warnings. Secrets, credentials, file contents, and Authorization headers are never rendered or logged.
-- HTTPS is required by default; HTTP requires explicit confirmation. Invalid or self-signed TLS certificates are rejected.
+- HTTPS is required by default; HTTP requires explicit confirmation. Invalid or self-signed TLS certificates are rejected. A connection must prove read access before it can be saved; a failed write probe produces an explicitly read-only connection.
 - Limits: 50 MiB per file and 500 MiB per operation.
 
 ## Verification
@@ -64,3 +65,4 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 - The integration fixture is a local `node:http` WebDAV server; Docker and vendor-specific CI are intentionally excluded.
 - Ubuntu runs the complete Node 22/24 matrix. Windows and macOS run type, unit, and sensitive-permission checks.
 - The public README is English with a Chinese translation. Development documentation and contributor guidance are English.
+- Tag-triggered npm publishing uses GitHub OIDC and explicit npm provenance.

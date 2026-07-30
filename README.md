@@ -42,8 +42,8 @@ Run `/sync-webdav` and follow the prompts to configure WebDAV and select the loc
 
 After configuration, select **settings** in the dashboard or run `/sync-webdav settings`:
 
-- **Connection** updates the URL, remote path, username, and password. The complete connection is verified before it is saved.
-- **Push selection** updates only the local selection and does not contact WebDAV.
+- **Connection** updates the URL, remote path, username, and password. The complete connection is checked for read access and write capability before it is saved. A readable but non-writable target is saved as read-only.
+- **Push selection** updates only the local selection, does not contact WebDAV, and requires a final review before saving.
 
 Changing a connection does not push or pull automatically. Choose `push` or `pull` yourself.
 
@@ -57,7 +57,11 @@ You can change the selection in **settings**. Directories are recursive. `sessio
 
 When changes are found, push and pull show a plan and require confirmation. Pull validates the complete download before changing local files and creates local backups for files it replaces or removes.
 
-Package declarations in `settings.json` are applied after files. If a package operation fails, the pulled files remain and Pi asks you to resolve the package manually.
+Long-running interactive actions show progress. Press Esc to request cancellation.
+
+The dashboard provides **Clean remote residue** for writable connections. It only removes recognized stale sync data; unrecognized remote items are retained.
+
+Package declarations in `settings.json` are applied after files. If a package operation fails or cancellation interrupts that step, the pulled files remain and Pi asks you to resolve the package manually.
 
 There is no remote history or remote restore operation.
 

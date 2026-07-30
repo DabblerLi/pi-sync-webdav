@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { TextDecoder } from 'node:util';
 
 import { MAX_FILE_BYTES, MAX_OPERATION_BYTES } from './manifest.js';
+import { throwIfOperationCancelled, type OperationOptions } from './operation.js';
 import {
 	isPermanentlyExcluded,
 	parseManifestPath,
@@ -131,16 +132,32 @@ async function getCandidateType(path: string): Promise<'directory' | 'file' | 'm
 
 export async function listSelectionCandidates(
 	agentRoot: string,
+	operation?: OperationOptions,
 ): Promise<readonly SelectionCandidate[]> {
 	const root = assertSafeAgentRoot(agentRoot);
+	throwIfOperationCancelled(operation?.signal);
+	operation?.onProgress?.({ phase: 'preparing' });
+	throwIfOperationCancelled(operation?.signal);
 	await assertAgentRootDirectory(root);
 
 	const candidates = new Map<SafeRelativePath, SelectionCandidate>();
 	for (const path of DEFAULT_PUSH_INCLUDES) {
+		throwIfOperationCancelled(operation?.signal);
 		const type = await getCandidateType(join(root, path));
 		if (type !== 'skip') {
 			candidates.set(path, { defaultSelected: true, path, type });
 		}
+	}
+	const sessionsPath = parsePushInclude('sessions');
+	throwIfOperationCancelled(operation?.signal);
+	const sessionsType = await getCandidateType(join(root, sessionsPath));
+	throwIfOperationCancelled(operation?.signal);
+	if (sessionsType !== 'skip') {
+		candidates.set(sessionsPath, {
+			defaultSelected: false,
+			path: sessionsPath,
+			type: sessionsType,
+		});
 	}
 
 	let entries;
@@ -150,6 +167,7 @@ export async function listSelectionCandidates(
 		throw new Error('Unable to list Pi agent directory');
 	}
 	for (const name of entries) {
+		throwIfOperationCancelled(operation?.signal);
 		let path: SafeRelativePath;
 		try {
 			path = parsePushInclude(name);
@@ -175,8 +193,12 @@ export async function collectLocalSelection(input: {
 	readonly agentRoot: string;
 	readonly enforceAuthPermissions?: boolean;
 	readonly includes: readonly SafeRelativePath[];
+	readonly operation?: OperationOptions;
 }): Promise<LocalSelection> {
 	const root = assertSafeAgentRoot(input.agentRoot);
+	throwIfOperationCancelled(input.operation?.signal);
+	input.operation?.onProgress?.({ phase: 'preparing' });
+	throwIfOperationCancelled(input.operation?.signal);
 	await assertAgentRootDirectory(root);
 	const includes = input.includes.map(parsePushInclude);
 	if (new Set(includes).size !== includes.length) {
@@ -192,6 +214,7 @@ export async function collectLocalSelection(input: {
 		absolutePath: string,
 		relativePath: SafeRelativePath,
 	): Promise<void> => {
+		throwIfOperationCancelled(input.operation?.signal);
 		let entry;
 		try {
 			entry = await lstat(absolutePath);
@@ -217,6 +240,7 @@ export async function collectLocalSelection(input: {
 			maxBytes: MAX_FILE_BYTES,
 			...(relativePath === 'auth.json' && input.enforceAuthPermissions ? { mode: 0o600 } : {}),
 		});
+		throwIfOperationCancelled(input.operation?.signal);
 		if (contents === undefined) {
 			return;
 		}
@@ -240,6 +264,7 @@ export async function collectLocalSelection(input: {
 		absolutePath: string,
 		relativePath: SafeRelativePath,
 	): Promise<void> => {
+		throwIfOperationCancelled(input.operation?.signal);
 		let directoryEntry;
 		try {
 			directoryEntry = await lstat(absolutePath);
@@ -267,6 +292,7 @@ export async function collectLocalSelection(input: {
 			throw new Error('Unable to list selected directory');
 		}
 		for (const name of entries.sort()) {
+			throwIfOperationCancelled(input.operation?.signal);
 			const rawChildPath = `${relativePath}/${name}`;
 			if (isPermanentlyExcluded(rawChildPath)) {
 				continue;
@@ -299,6 +325,7 @@ export async function collectLocalSelection(input: {
 	};
 
 	for (const include of [...includes].sort(comparePaths)) {
+		throwIfOperationCancelled(input.operation?.signal);
 		const absolutePath = join(root, include);
 		let entry;
 		try {

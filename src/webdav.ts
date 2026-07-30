@@ -18,20 +18,29 @@ export interface TransferProgress {
 	readonly total: number | undefined;
 }
 
+export interface WebDavRequestOptions {
+	readonly onRetry?: (progress: { readonly attempt: number; readonly total: number }) => void;
+	readonly signal?: AbortSignal;
+}
+
 export interface WebDavGateway {
-	createDirectory(path: RemotePath): Promise<void>;
-	deletePath(path: RemotePath): Promise<void>;
-	directoryContents(path: RemotePath): Promise<readonly RemoteDirectoryEntry[]>;
-	exists(path: RemotePath): Promise<boolean>;
+	createDirectory(path: RemotePath, options?: WebDavRequestOptions): Promise<void>;
+	deletePath(path: RemotePath, options?: WebDavRequestOptions): Promise<void>;
+	directoryContents(
+		path: RemotePath,
+		options?: WebDavRequestOptions,
+	): Promise<readonly RemoteDirectoryEntry[]>;
+	exists(path: RemotePath, options?: WebDavRequestOptions): Promise<boolean>;
 	readFile(
 		path: RemotePath,
 		onProgress?: (progress: TransferProgress) => void,
-		signal?: AbortSignal,
+		options?: AbortSignal | WebDavRequestOptions,
 	): Promise<Buffer>;
 	writeFile(
 		path: RemotePath,
 		contents: Buffer,
 		onProgress?: (progress: TransferProgress) => void,
+		options?: WebDavRequestOptions,
 	): Promise<void>;
 }
 
@@ -136,6 +145,43 @@ async function readStreamWithLimit(
 	return Buffer.concat(chunks);
 }
 
+function normalizeRequestOptions(
+	options: AbortSignal | WebDavRequestOptions | undefined,
+): WebDavRequestOptions {
+	if (options === undefined) {
+		return {};
+	}
+	if ('aborted' in options && 'addEventListener' in options) {
+		return { signal: options as AbortSignal };
+	}
+	return options;
+}
+
+async function waitForRetryDelay(delay: number, signal: AbortSignal | undefined): Promise<void> {
+	if (signal?.aborted) {
+		throw new WebDavRequestError('WebDAV request cancelled', { retryable: false });
+	}
+	if (delay === 0) {
+		return;
+	}
+	await new Promise<void>((resolveDelay, rejectDelay) => {
+		const timeout = setTimeout(finish, delay);
+		const abort = (): void => {
+			clearTimeout(timeout);
+			finish(new WebDavRequestError('WebDAV request cancelled', { retryable: false }));
+		};
+		function finish(error?: Error): void {
+			signal?.removeEventListener('abort', abort);
+			if (error === undefined) {
+				resolveDelay();
+			} else {
+				rejectDelay(error);
+			}
+		}
+		signal?.addEventListener('abort', abort, { once: true });
+	});
+}
+
 class SafeWebDavGateway implements WebDavGateway {
 	readonly #client: WebDAVClient;
 	readonly #maxResponseBytes: number;
@@ -157,55 +203,71 @@ class SafeWebDavGateway implements WebDavGateway {
 		}
 	}
 
-	async createDirectory(path: RemotePath): Promise<void> {
+	async createDirectory(path: RemotePath, options?: WebDavRequestOptions): Promise<void> {
 		const remotePath = parseRemotePath(path);
-		await this.#execute((signal) => this.#client.createDirectory(remotePath, { signal }));
+		await this.#execute(
+			(signal) => this.#client.createDirectory(remotePath, { signal }),
+			normalizeRequestOptions(options),
+		);
 	}
 
-	async deletePath(path: RemotePath): Promise<void> {
+	async deletePath(path: RemotePath, options?: WebDavRequestOptions): Promise<void> {
 		const remotePath = parseRemotePath(path);
-		await this.#execute((signal) => this.#client.deleteFile(remotePath, { signal }));
+		await this.#execute(
+			(signal) => this.#client.deleteFile(remotePath, { signal }),
+			normalizeRequestOptions(options),
+		);
 	}
 
-	async directoryContents(path: RemotePath): Promise<readonly RemoteDirectoryEntry[]> {
+	async directoryContents(
+		path: RemotePath,
+		options?: WebDavRequestOptions,
+	): Promise<readonly RemoteDirectoryEntry[]> {
 		const remotePath = parseRemotePath(path);
-		const contents = await this.#execute((signal) =>
-			this.#client.getDirectoryContents(remotePath, { signal }),
+		const contents = await this.#execute(
+			(signal) => this.#client.getDirectoryContents(remotePath, { signal }),
+			normalizeRequestOptions(options),
 		);
 		return contents.map(toRemoteDirectoryEntry);
 	}
 
-	async exists(path: RemotePath): Promise<boolean> {
+	async exists(path: RemotePath, options?: WebDavRequestOptions): Promise<boolean> {
 		const remotePath = parseRemotePath(path);
-		return this.#execute((signal) => this.#client.exists(remotePath, { signal }));
+		return this.#execute(
+			(signal) => this.#client.exists(remotePath, { signal }),
+			normalizeRequestOptions(options),
+		);
 	}
 
 	async readFile(
 		path: RemotePath,
 		onProgress?: (progress: TransferProgress) => void,
-		externalSignal?: AbortSignal,
+		options?: AbortSignal | WebDavRequestOptions,
 	): Promise<Buffer> {
 		const remotePath = parseRemotePath(path);
 		return this.#execute(async (signal) => {
 			const stream = this.#client.createReadStream(remotePath, { signal });
 			return readStreamWithLimit(stream, this.#maxResponseBytes, onProgress);
-		}, externalSignal);
+		}, normalizeRequestOptions(options));
 	}
 
 	async writeFile(
 		path: RemotePath,
 		contents: Buffer,
 		onProgress?: (progress: TransferProgress) => void,
+		options?: WebDavRequestOptions,
 	): Promise<void> {
 		const remotePath = parseRemotePath(path);
 		if (contents.byteLength > MAX_FILE_BYTES) {
 			throw new WebDavRequestError('WebDAV upload exceeds the size limit', { retryable: false });
 		}
-		const wasWritten = await this.#execute((signal) =>
-			this.#client.putFileContents(remotePath, contents, {
-				onUploadProgress: ({ loaded, total }) => onProgress?.({ loaded, total }),
-				signal,
-			}),
+		const wasWritten = await this.#execute(
+			(signal) =>
+				this.#client.putFileContents(remotePath, contents, {
+					onUploadProgress: ({ loaded, total }) => onProgress?.({ loaded, total }),
+					signal,
+				}),
+			normalizeRequestOptions(options),
 		);
 		if (!wasWritten) {
 			throw new WebDavRequestError('WebDAV write was rejected', { retryable: false });
@@ -214,15 +276,15 @@ class SafeWebDavGateway implements WebDavGateway {
 
 	async #execute<T>(
 		operation: (signal: AbortSignal) => Promise<T>,
-		externalSignal?: AbortSignal,
+		options: WebDavRequestOptions = {},
 	): Promise<T> {
 		let latestError: WebDavRequestError | undefined;
 		for (let attempt = 0; attempt <= this.#retryDelaysMs.length; attempt += 1) {
-			if (externalSignal?.aborted) {
+			if (options.signal?.aborted) {
 				throw new WebDavRequestError('WebDAV request cancelled', { retryable: false });
 			}
 			try {
-				return await this.#executeOnce(operation, externalSignal);
+				return await this.#executeOnce(operation, options.signal);
 			} catch (error: unknown) {
 				const safeError = toSafeRequestError(error);
 				latestError = safeError;
@@ -230,7 +292,8 @@ class SafeWebDavGateway implements WebDavGateway {
 				if (!safeError.retryable || delay === undefined) {
 					throw safeError;
 				}
-				await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delay));
+				options.onRetry?.({ attempt: attempt + 2, total: this.#retryDelaysMs.length + 1 });
+				await waitForRetryDelay(delay, options.signal);
 			}
 		}
 		throw latestError ?? new WebDavRequestError('WebDAV request failed', { retryable: false });

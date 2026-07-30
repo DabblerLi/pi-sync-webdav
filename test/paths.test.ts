@@ -9,6 +9,7 @@ import {
 	normalizeConnection,
 	parseManifestPath,
 	parsePushInclude,
+	parseRemotePath,
 	resolveLocalTarget,
 } from '../src/paths.js';
 import { createTemporaryDirectory, removeTemporaryDirectory } from './helpers.js';
@@ -111,11 +112,24 @@ describe('safe relative paths', () => {
 			'themes//dark.json',
 			'../settings.json',
 			'npm/pkg',
+			'NPM/pkg',
 			'git/repo',
-			'pi-sync-webdav/config.json',
+			'PI-SYNC-WEBDAV/config.json',
 			'extensions/logs/activity.json',
+			'extensions/LOGS/activity.json',
 			'skills/node_modules/package/index.js',
+			'skills/NODE_MODULES/package/index.js',
 			'themes/\u0085dark.json',
+			'themes/file:stream.json',
+			'themes/CON.json',
+			'themes/NUL',
+			'themes/COM1',
+			'themes/Lpt9.txt',
+			'themes/CLOCK$',
+			'themes/trailing-dot.',
+			'themes/trailing-space ',
+			'themes/wildcard?.json',
+			'themes/pipe|name.json',
 		]) {
 			expect(() => parseManifestPath(path)).toThrow();
 		}
@@ -124,14 +138,20 @@ describe('safe relative paths', () => {
 	it('limits push includes to one safe top-level path', () => {
 		expect(parsePushInclude('themes')).toBe('themes');
 		expect(parsePushInclude('.git')).toBe('.git');
+		expect(parsePushInclude('valid.name')).toBe('valid.name');
 		expect(() => parsePushInclude('themes/dark.json')).toThrow();
 		expect(() => parsePushInclude('npm')).toThrow();
+		expect(() => parsePushInclude('NPM')).toThrow();
 		expect(() => parsePushInclude('logs')).toThrow();
+		expect(() => parsePushInclude('LOGS')).toThrow();
 		expect(() => parsePushInclude('node_modules')).toThrow();
+		expect(() => parsePushInclude('NODE_MODULES')).toThrow();
+		expect(() => parsePushInclude('AUX')).toThrow();
+		expect(() => parsePushInclude('stream:file')).toThrow();
 	});
 
 	it('encodes every remote path segment independently', () => {
-		const path = parseManifestPath('themes/a b%#?.json');
+		const path = parseRemotePath('themes/a b%#?.json');
 
 		expect(encodeRemotePath(path)).toBe('themes/a%20b%25%23%3F.json');
 	});

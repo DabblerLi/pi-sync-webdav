@@ -1,10 +1,111 @@
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import { Key, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
+import { CancellableLoader, Key, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
+
+import {
+	isOperationCancelled,
+	type OperationOptions,
+	type OperationProgress,
+} from './operation.js';
 
 import type { PackageOperation } from './package-sync.js';
 import type { SafeRelativePath } from './paths.js';
 import type { SelectionCandidate } from './selection.js';
 import type { FileMutation } from './sync-plan.js';
+
+export interface CancellableOperationResult<T> {
+	readonly cancelled: boolean;
+	readonly value: T | undefined;
+}
+
+export function formatOperationProgress(progress: OperationProgress): string {
+	const count =
+		progress.completed === undefined || progress.total === undefined
+			? ''
+			: ` (${progress.completed}/${progress.total})`;
+	switch (progress.phase) {
+		case 'applying':
+			return `Applying configuration${count}…`;
+		case 'cleaning':
+			return 'Cleaning remote residue…';
+		case 'downloading':
+			return `Downloading configuration${count}…`;
+		case 'preparing':
+			return 'Preparing configuration…';
+		case 'restoring':
+			return `Restoring local backups${count}…`;
+		case 'retrying':
+			return `Retrying WebDAV request${count}…`;
+		case 'uploading':
+			return `Uploading configuration${count}…`;
+		case 'validating':
+			return 'Validating WebDAV connection…';
+	}
+}
+
+export async function runCancellableOperation<T>(
+	ctx: ExtensionCommandContext,
+	initialProgress: OperationProgress,
+	operation: (options: OperationOptions) => Promise<T>,
+): Promise<CancellableOperationResult<T>> {
+	if (ctx.mode !== 'tui') {
+		return { cancelled: true, value: undefined };
+	}
+	let failure: unknown;
+	const result = await ctx.ui.custom<CancellableOperationResult<T>>(
+		(tui, theme, _keybindings, done) => {
+			const loader = new CancellableLoader(
+				tui,
+				(value) => theme.fg('accent', value),
+				(value) => theme.fg('muted', value),
+				formatOperationProgress(initialProgress),
+			);
+			const updateProgress = (progress: OperationProgress): void => {
+				loader.setMessage(formatOperationProgress(progress));
+				tui.requestRender();
+			};
+			let complete = false;
+			const finish = (value: CancellableOperationResult<T>): void => {
+				if (!complete) {
+					complete = true;
+					done(value);
+				}
+			};
+			loader.onAbort = () => {
+				loader.setMessage('Cancelling operation…');
+				tui.requestRender();
+			};
+			void operation({ onProgress: updateProgress, signal: loader.signal }).then(
+				(value) => finish({ cancelled: loader.aborted, value }),
+				(error: unknown) => {
+					if (!loader.aborted || !isOperationCancelled(error)) {
+						failure = error;
+					}
+					finish({ cancelled: loader.aborted, value: undefined });
+				},
+			);
+			return loader;
+		},
+	);
+	if (failure !== undefined) {
+		throw failure;
+	}
+	return result;
+}
+
+export async function confirmPushSelection(
+	ctx: ExtensionCommandContext,
+	paths: readonly SafeRelativePath[],
+): Promise<boolean> {
+	if (ctx.mode !== 'tui') {
+		return false;
+	}
+	return ctx.ui.confirm(
+		'Save push selection?',
+		paths.length === 0
+			? 'No paths are selected.'
+			: paths.map((path) => `INCLUDE ${path}`).join('\n'),
+	);
+}
 
 function actionLabel(action: FileMutation['action']): string {
 	return action.toUpperCase();

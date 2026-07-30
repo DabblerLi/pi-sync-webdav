@@ -96,6 +96,61 @@ describe('WebDAV gateway', () => {
 		});
 	});
 
+	it('reports retry state and cancels before another retry begins', async () => {
+		const { gateway, server } = await createGateway();
+		const root = parseRemotePath('pi-sync-webdav');
+		const file = parseRemotePath('pi-sync-webdav/retry-cancel.txt');
+		await gateway.createDirectory(root);
+		await gateway.writeFile(file, Buffer.from('retry', 'utf8'));
+		server.failNext('GET', 'pi-sync-webdav/retry-cancel.txt', 503);
+		const controller = new AbortController();
+		const retries: Array<{ attempt: number; total: number }> = [];
+
+		const request = gateway.readFile(file, undefined, {
+			onRetry: (retry) => {
+				retries.push(retry);
+				controller.abort();
+			},
+			signal: controller.signal,
+		});
+
+		await expect(request).rejects.toMatchObject({ message: 'WebDAV request cancelled' });
+		expect(retries).toEqual([{ attempt: 2, total: 3 }]);
+	});
+
+	it('cancels a directory request when its caller aborts', async () => {
+		const { gateway, server } = await createGateway();
+		const root = parseRemotePath('pi-sync-webdav');
+		await gateway.createDirectory(root);
+		server.delayNext('PROPFIND', 'pi-sync-webdav', 50);
+		const controller = new AbortController();
+		const request = gateway.directoryContents(root, { signal: controller.signal });
+		controller.abort();
+
+		await expect(request).rejects.toMatchObject({
+			message: 'WebDAV request cancelled',
+			retryable: false,
+		});
+	});
+
+	it('cancels an upload when its caller aborts', async () => {
+		const { gateway, server } = await createGateway();
+		const root = parseRemotePath('pi-sync-webdav');
+		const file = parseRemotePath('pi-sync-webdav/cancel-upload.txt');
+		await gateway.createDirectory(root);
+		server.delayNext('PUT', 'pi-sync-webdav/cancel-upload.txt', 50);
+		const controller = new AbortController();
+		const request = gateway.writeFile(file, Buffer.from('cancel', 'utf8'), undefined, {
+			signal: controller.signal,
+		});
+		controller.abort();
+
+		await expect(request).rejects.toMatchObject({
+			message: 'WebDAV request cancelled',
+			retryable: false,
+		});
+	});
+
 	it('bounds successful/error responses and redacts authentication failures', async () => {
 		const { gateway, server } = await createGateway();
 		const root = parseRemotePath('pi-sync-webdav');

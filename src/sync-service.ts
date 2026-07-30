@@ -4,6 +4,7 @@ import { TextDecoder } from 'node:util';
 import { SettingsManager, type PackageSource } from '@earendil-works/pi-coding-agent';
 
 import { connectionFingerprint, writeConfig, type PluginConfig } from './config.js';
+import { isOperationCancelled, type OperationOptions } from './operation.js';
 import {
 	applyPullPlan,
 	createPullWorkspace,
@@ -26,6 +27,7 @@ import {
 	RemoteStore,
 	UnverifiedRemoteManifestError,
 	type PublishRevisionResult,
+	type RemoteOperationOptions,
 } from './remote-store.js';
 import { collectLocalSelection, type LocalSelection } from './selection.js';
 import { planPull, planPush, type PullPlan, type PushPlan } from './sync-plan.js';
@@ -54,11 +56,42 @@ export interface StagedPull {
 }
 
 export interface PullExecutionResult {
+	readonly cancelled?: boolean;
 	readonly files: ApplyResult;
 	readonly packages: PackageOperationResult | undefined;
 }
 
 export type PackageRuntimeFactory = (agentRoot: string) => PackageSyncRuntime;
+
+function normalizeOperationOptions(
+	options: AbortSignal | OperationOptions | undefined,
+): OperationOptions | undefined {
+	if (options === undefined) {
+		return undefined;
+	}
+	if ('aborted' in options && 'addEventListener' in options) {
+		return { signal: options as AbortSignal };
+	}
+	return options;
+}
+
+function remoteOperationOptions(
+	operation: OperationOptions | undefined,
+): RemoteOperationOptions | undefined {
+	if (operation === undefined) {
+		return undefined;
+	}
+	return {
+		...(operation.signal === undefined ? {} : { signal: operation.signal }),
+		onProgress: (progress) => operation.onProgress?.(progress),
+		onRetry: (retry) =>
+			operation.onProgress?.({
+				completed: retry.attempt,
+				phase: 'retrying',
+				total: retry.total,
+			}),
+	};
+}
 
 function configWithSyncState(
 	config: PluginConfig,
@@ -93,6 +126,7 @@ function packageSourcesFromContents(contents: Buffer): readonly PackageSource[] 
 async function packageSourcesAfterPull(input: {
 	readonly before: readonly PackageSource[];
 	readonly manifest: ManifestV1;
+	readonly operation?: OperationOptions;
 	readonly plan: PullPlan;
 	readonly store: RemoteStore;
 }): Promise<{
@@ -112,26 +146,34 @@ async function packageSourcesAfterPull(input: {
 	}
 	// Package operations must be shown in the single pull confirmation. Read only the
 	// settings declaration here; all other revision files remain untransferred until confirmation.
-	const contents = await input.store.readRevisionFile(input.manifest, settingsAction.source);
+	const contents = await input.store.readRevisionFile(
+		input.manifest,
+		settingsAction.source,
+		remoteOperationOptions(input.operation),
+	);
 	return {
 		after: packageSourcesFromContents(contents),
 		downloadedSettings: { contents, file: settingsAction.source },
 	};
 }
 
-export async function preparePush(input: {
-	readonly agentRoot: string;
-	readonly config: PluginConfig;
-	readonly store: RemoteStore;
-}): Promise<PushPreparation> {
+export async function preparePush(
+	input: {
+		readonly agentRoot: string;
+		readonly config: PluginConfig;
+		readonly store: RemoteStore;
+	},
+	operation?: OperationOptions,
+): Promise<PushPreparation> {
 	const root = resolve(input.agentRoot);
 	const selection = await collectLocalSelection({
 		agentRoot: root,
 		enforceAuthPermissions: true,
 		includes: input.config.pushInclude,
+		...(operation === undefined ? {} : { operation }),
 	});
 	try {
-		const remote = await input.store.readManifest();
+		const remote = await input.store.readManifest(remoteOperationOptions(operation));
 		return {
 			config: input.config,
 			plan: planPush({ local: selection, remote }),
@@ -143,7 +185,7 @@ export async function preparePush(input: {
 		if (!(error instanceof UnverifiedRemoteManifestError)) {
 			throw error;
 		}
-		const rawManifest = await input.store.readRawManifest();
+		const rawManifest = await input.store.readRawManifest(remoteOperationOptions(operation));
 		if (rawManifest === undefined) {
 			throw error;
 		}
@@ -161,16 +203,19 @@ export async function preparePush(input: {
 export async function publishPreparedPush(
 	agentRoot: string,
 	preparation: PushPreparation,
-	options: { readonly allowUnverifiedManifest: boolean },
+	options: { readonly allowUnverifiedManifest: boolean; readonly operation?: OperationOptions },
 ): Promise<PublishRevisionResult> {
 	if (preparation.requiresUnverifiedManifestConfirmation && !options.allowUnverifiedManifest) {
 		throw new Error('Unverified remote manifest requires confirmation');
 	}
-	const published = await preparation.store.publishRevision({
-		allowUnverifiedManifest: options.allowUnverifiedManifest,
-		expectedManifestSha256: preparation.plan.expectedRemoteManifestSha256,
-		files: preparation.selection.files,
-	});
+	const published = await preparation.store.publishRevision(
+		{
+			allowUnverifiedManifest: options.allowUnverifiedManifest,
+			expectedManifestSha256: preparation.plan.expectedRemoteManifestSha256,
+			files: preparation.selection.files,
+		},
+		remoteOperationOptions(options.operation),
+	);
 	await writeConfig(
 		agentRoot,
 		configWithSyncState(
@@ -188,9 +233,10 @@ export async function preparePull(
 		readonly store: RemoteStore;
 	},
 	packageRuntimeFactory: PackageRuntimeFactory = createGlobalPackageSyncRuntime,
+	operation?: OperationOptions,
 ): Promise<PullPreparation> {
 	const root = resolve(input.agentRoot);
-	const manifestSnapshot = await input.store.readManifest();
+	const manifestSnapshot = await input.store.readManifest(remoteOperationOptions(operation));
 	if (manifestSnapshot === undefined) {
 		throw new Error('The remote manifest does not exist');
 	}
@@ -198,6 +244,7 @@ export async function preparePull(
 		agentRoot: root,
 		connectionFingerprint: connectionFingerprint(input.config.connection),
 		manifest: manifestSnapshot.manifest,
+		...(operation === undefined ? {} : { operation }),
 		syncState: input.config.syncState,
 	});
 	const before = readGlobalPackageSources(packageRuntimeFactory(root).settingsManager);
@@ -206,6 +253,7 @@ export async function preparePull(
 		manifest: manifestSnapshot.manifest,
 		plan,
 		store: input.store,
+		...(operation === undefined ? {} : { operation }),
 	});
 	const packagePlan = await planPackageSync({
 		after: packageSources.after,
@@ -225,22 +273,35 @@ export async function preparePull(
 export async function stagePreparedPull(
 	agentRoot: string,
 	preparation: PullPreparation,
-	signal?: AbortSignal,
+	options?: AbortSignal | OperationOptions,
 ): Promise<StagedPull> {
+	const operation = normalizeOperationOptions(options);
 	let workspace: PullWorkspace | undefined;
 	try {
 		workspace = await createPullWorkspace(agentRoot);
-		for (const file of preparation.plan.downloads) {
-			if (signal?.aborted) {
+		for (const [index, file] of preparation.plan.downloads.entries()) {
+			if (operation?.signal?.aborted) {
+				throw new Error('Pull download cancelled');
+			}
+			operation?.onProgress?.({
+				completed: index + 1,
+				phase: 'downloading',
+				total: preparation.plan.downloads.length,
+			});
+			if (operation?.signal?.aborted) {
 				throw new Error('Pull download cancelled');
 			}
 			const contents =
 				preparation.downloadedSettings?.file.path === file.path
 					? preparation.downloadedSettings.contents
-					: await preparation.store.readRevisionFile(preparation.manifest, file, signal);
-			await stageVerifiedFile(agentRoot, workspace, file, contents);
+					: await preparation.store.readRevisionFile(
+							preparation.manifest,
+							file,
+							remoteOperationOptions(operation),
+						);
+			await stageVerifiedFile(agentRoot, workspace, file, contents, operation);
 		}
-		await sealPullWorkspace(agentRoot, workspace, preparation.manifest);
+		await sealPullWorkspace(agentRoot, workspace, preparation.manifest, operation);
 		return { preparation, workspace };
 	} catch (error: unknown) {
 		if (workspace === undefined) {
@@ -250,6 +311,9 @@ export async function stagePreparedPull(
 			await disposePullWorkspace(agentRoot, workspace);
 		} catch {
 			throw new Error('Pull download failed and workspace cleanup failed', { cause: error });
+		}
+		if (isOperationCancelled(error)) {
+			throw new Error('Pull download cancelled');
 		}
 		throw error;
 	}
@@ -263,18 +327,31 @@ export async function applyStagedPull(
 	agentRoot: string,
 	staged: StagedPull,
 	packageRuntimeFactory: PackageRuntimeFactory = createGlobalPackageSyncRuntime,
+	operation?: OperationOptions,
 ): Promise<PullExecutionResult> {
 	try {
-		const files = await applyPullPlan(agentRoot, staged.workspace, staged.preparation.plan);
+		const files = await applyPullPlan(
+			agentRoot,
+			staged.workspace,
+			staged.preparation.plan,
+			operation,
+		);
 		if (files.status !== 'applied') {
 			return { files, packages: undefined };
 		}
 		const runtime = packageRuntimeFactory(resolve(agentRoot));
 		readGlobalPackageSources(runtime.settingsManager);
+		if (operation?.signal?.aborted) {
+			return { cancelled: true, files, packages: undefined };
+		}
 		const packages = await applyPackageOperations(
 			runtime.packageManager,
 			staged.preparation.packageOperations,
+			operation,
 		);
+		if (packages.cancelled || operation?.signal?.aborted) {
+			return { cancelled: true, files, packages };
+		}
 		await writeConfig(
 			agentRoot,
 			configWithSyncState(staged.preparation.config, staged.preparation.plan.nextManagedPaths),

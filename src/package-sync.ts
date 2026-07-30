@@ -3,6 +3,8 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import type { OperationOptions } from './operation.js';
+
 import {
 	DefaultPackageManager,
 	SettingsManager,
@@ -25,6 +27,7 @@ export interface PackageSyncPlan {
 }
 
 export interface PackageOperationResult {
+	readonly cancelled?: boolean;
 	readonly failed: readonly PackageOperation[];
 	readonly failureMessage: string | undefined;
 	readonly succeeded: readonly PackageOperation[];
@@ -78,6 +81,37 @@ function splitPackageDeclarations(value: readonly PackageSource[] | undefined): 
 	return (value ?? []).map(packageSourceString);
 }
 
+const MAX_PERCENT_DECODE_DEPTH = 8;
+const UNSAFE_GIT_REF_CHARACTERS = new Set(['~', '^', ':', '?', '*', '[', '\\', '@']);
+
+function decodePackageSpecPart(value: string): string {
+	let decoded = value;
+	for (let depth = 0; depth < MAX_PERCENT_DECODE_DEPTH; depth += 1) {
+		if (!decoded.includes('%')) {
+			return decoded;
+		}
+		try {
+			decoded = decodeURIComponent(decoded);
+		} catch {
+			invalidPackageSource();
+		}
+	}
+	if (decoded.includes('%')) {
+		invalidPackageSource();
+	}
+	return decoded;
+}
+
+function assertSafeNpmVersionSpec(value: string | undefined): void {
+	if (value === undefined) {
+		return;
+	}
+	const decoded = decodePackageSpecPart(value);
+	if (decoded.length === 0 || /[@:\\/]/u.test(decoded)) {
+		invalidPackageSource();
+	}
+}
+
 function npmIdentity(source: string): string {
 	const spec = source.slice('npm:'.length).trim();
 	if (spec.length === 0 || spec.includes('?') || spec.includes('#')) {
@@ -95,10 +129,14 @@ function npmIdentity(source: string): string {
 		}
 	}
 	const parsed = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@(.+))?$/u);
-	const name = parsed?.[1] ?? spec;
-	if (name.length === 0 || /\s/u.test(name)) {
+	if (parsed === null) {
 		invalidPackageSource();
 	}
+	const name = parsed[1];
+	if (name === undefined || name.length === 0 || /\s/u.test(name)) {
+		invalidPackageSource();
+	}
+	assertSafeNpmVersionSpec(parsed[2]);
 	return `npm:${name.toLowerCase()}`;
 }
 
@@ -112,6 +150,7 @@ function gitRepositoryPath(path: string): string {
 	if (repositoryPath.length === 0 || ref.length === 0) {
 		invalidPackageSource();
 	}
+	assertSafeGitRef(ref);
 	return repositoryPath;
 }
 
@@ -122,12 +161,7 @@ function normalizeGitPath(path: string): string {
 		invalidPackageSource();
 	}
 	for (const segment of segments) {
-		let decoded: string;
-		try {
-			decoded = decodeURIComponent(segment);
-		} catch {
-			invalidPackageSource();
-		}
+		const decoded = decodePackageSpecPart(segment);
 		if (
 			segment.length === 0 ||
 			decoded.length === 0 ||
@@ -142,18 +176,82 @@ function normalizeGitPath(path: string): string {
 	return trimmed;
 }
 
+function containsUnsafeGitRefCharacter(value: string): boolean {
+	for (const character of value) {
+		const code = character.codePointAt(0);
+		if (
+			(code !== undefined && (code <= 0x20 || code === 0x7f)) ||
+			UNSAFE_GIT_REF_CHARACTERS.has(character)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function assertSafeGitRef(ref: string | undefined): void {
+	if (ref === undefined) {
+		return;
+	}
+	const decoded = decodePackageSpecPart(ref);
+	if (decoded.startsWith('semver:')) {
+		const range = decoded.slice('semver:'.length);
+		if (range.length === 0 || !/^[0-9A-Za-z*+._^~<>=| -]+$/u.test(range)) {
+			invalidPackageSource();
+		}
+		return;
+	}
+	if (
+		decoded.length === 0 ||
+		containsUnsafeGitRefCharacter(decoded) ||
+		decoded.includes('..') ||
+		decoded.includes('@{') ||
+		decoded.startsWith('/') ||
+		decoded.endsWith('/')
+	) {
+		invalidPackageSource();
+	}
+	for (const component of decoded.split('/')) {
+		if (
+			component.length === 0 ||
+			component === '.' ||
+			component === '..' ||
+			component.endsWith('.') ||
+			component.endsWith('.lock')
+		) {
+			invalidPackageSource();
+		}
+	}
+}
+
 function hostedGitIdentity(raw: string): string | undefined {
 	const match = raw.match(/^(github|gitlab|bitbucket):(.+)$/u);
 	if (match === null) {
 		return undefined;
 	}
-	const host =
-		match[1] === 'github' ? 'github.com' : match[1] === 'gitlab' ? 'gitlab.com' : 'bitbucket.org';
-	const repositoryPath = match[2]?.split('#', 1)[0];
-	if (repositoryPath === undefined || repositoryPath.length === 0) {
+	if (raw.includes('?')) {
 		invalidPackageSource();
 	}
-	return `git:${host}/${normalizeGitPath(repositoryPath)}`;
+	const host =
+		match[1] === 'github' ? 'github.com' : match[1] === 'gitlab' ? 'gitlab.com' : 'bitbucket.org';
+	const sourcePath = match[2];
+	if (sourcePath === undefined) {
+		invalidPackageSource();
+	}
+	const fragmentIndex = sourcePath.indexOf('#');
+	if (fragmentIndex !== sourcePath.lastIndexOf('#')) {
+		invalidPackageSource();
+	}
+	const repositoryPath = fragmentIndex === -1 ? sourcePath : sourcePath.slice(0, fragmentIndex);
+	if (repositoryPath.length === 0) {
+		invalidPackageSource();
+	}
+	assertSafeGitRef(fragmentIndex === -1 ? undefined : sourcePath.slice(fragmentIndex + 1));
+	const identity = normalizeGitPath(repositoryPath);
+	if (identity.split('/').some((segment) => /[@:?]/u.test(decodePackageSpecPart(segment)))) {
+		invalidPackageSource();
+	}
+	return `git:${host}/${identity}`;
 }
 
 function gitIdentity(source: string): string | undefined {
@@ -355,10 +453,27 @@ export async function planPackageSync(input: {
 export async function applyPackageOperations(
 	packageManager: PackageManagerForSync,
 	operations: readonly PackageOperation[],
+	operationOptions?: OperationOptions,
 ): Promise<PackageOperationResult> {
 	const failed: PackageOperation[] = [];
 	const succeeded: PackageOperation[] = [];
+	const cancelled = (): PackageOperationResult => ({
+		cancelled: true,
+		failed,
+		failureMessage:
+			failed.length > 0 || succeeded.length < operations.length
+				? 'One or more Pi package operations failed. Resolve them manually.'
+				: undefined,
+		succeeded,
+	});
 	for (const operation of operations) {
+		if (operationOptions?.signal?.aborted) {
+			return cancelled();
+		}
+		operationOptions?.onProgress?.({ phase: 'applying' });
+		if (operationOptions?.signal?.aborted) {
+			return cancelled();
+		}
 		try {
 			if (operation.action === 'remove') {
 				await packageManager.remove(operation.source);
@@ -369,6 +484,9 @@ export async function applyPackageOperations(
 			succeeded.push(operation);
 		} catch {
 			failed.push(operation);
+		}
+		if (operationOptions?.signal?.aborted) {
+			return cancelled();
 		}
 	}
 	return {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { generateRevisionId } from '../src/manifest.js';
 import { parseRemotePath, parseManifestPath, normalizeConnection } from '../src/paths.js';
 import {
 	RemoteCommitRejectedError,
@@ -7,6 +8,7 @@ import {
 	RemoteManifestChangedError,
 	RemoteStore,
 	UnverifiedRemoteManifestError,
+	WriteCapabilityProbeCancelledError,
 } from '../src/remote-store.js';
 import { createWebDavGateway, WebDavRequestError, type WebDavGateway } from '../src/webdav.js';
 import { MockWebDavServer } from './mock-webdav-server.js';
@@ -253,6 +255,202 @@ describe('remote store', () => {
 		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toHaveLength(1);
 	});
 
+	it('retains a revision when an aborted manifest write may commit after verification', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const manifestPath = parseRemotePath(`${root}/manifest.json`);
+		const delayedGateway: WebDavGateway = {
+			createDirectory: (path, options) => gateway.createDirectory(path, options),
+			deletePath: (path, options) => gateway.deletePath(path, options),
+			directoryContents: (path, options) => gateway.directoryContents(path, options),
+			exists: (path, options) => gateway.exists(path, options),
+			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
+			writeFile: async (path, contents, onProgress, options) => {
+				if (path === manifestPath) {
+					setTimeout(() => {
+						void gateway.writeFile(path, contents, onProgress, options);
+					}, 20);
+					throw new WebDavRequestError('WebDAV request cancelled', { retryable: false });
+				}
+				await gateway.writeFile(path, contents, onProgress, options);
+			},
+		};
+
+		await expect(
+			new RemoteStore(delayedGateway, root).publishRevision({
+				allowUnverifiedManifest: false,
+				expectedManifestSha256: undefined,
+				files: [{ contents: Buffer.from('new', 'utf8'), path: parseManifestPath('settings.json') }],
+			}),
+		).rejects.toBeInstanceOf(RemoteCommitUnknownError);
+		await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 50));
+		const committed = await store.readManifest();
+		if (committed === undefined) {
+			throw new Error('Expected delayed manifest activation');
+		}
+		expect(
+			await gateway.exists(parseRemotePath(`${root}/revisions/${committed.manifest.revision}`)),
+		).toBe(true);
+	});
+
+	it('validates read capability independently from write probing', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const unreadableGateway: WebDavGateway = {
+			createDirectory: (path, options) => gateway.createDirectory(path, options),
+			deletePath: (path, options) => gateway.deletePath(path, options),
+			directoryContents: (path, options) => gateway.directoryContents(path, options),
+			exists: (path, options) => gateway.exists(path, options),
+			readFile: async (path, onProgress, options) => {
+				if (path === parseRemotePath(`${root}/manifest.json`)) {
+					throw new WebDavRequestError('WebDAV authorization failed', {
+						retryable: false,
+						status: 403,
+					});
+				}
+				return gateway.readFile(path, onProgress, options);
+			},
+			writeFile: (path, contents, onProgress, options) =>
+				gateway.writeFile(path, contents, onProgress, options),
+		};
+
+		await expect(
+			new RemoteStore(unreadableGateway, root).verifyReadCapability(),
+		).rejects.toMatchObject({
+			status: 403,
+		});
+	});
+
+	it('lists and safely cleans only recognized inactive revision and probe residue', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const published = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('active', 'utf8'), path: parseManifestPath('settings.json') },
+			],
+		});
+		const staleRevision = generateRevisionId();
+		const staleRevisionPath = parseRemotePath(`${root}/revisions/${staleRevision}`);
+		const probeName = `.pi-sync-webdav-probe-${generateRevisionId()}`;
+		const probePath = parseRemotePath(`${root}/${probeName}`);
+		await gateway.createDirectory(staleRevisionPath);
+		await gateway.createDirectory(probePath);
+		await gateway.writeFile(parseRemotePath(`${root}/legacy.txt`), Buffer.from('legacy', 'utf8'));
+
+		const residue = await store.inspectResidue();
+		expect(residue).toEqual({
+			candidates: [
+				{ kind: 'probe', path: probeName },
+				{ kind: 'revision', path: `revisions/${staleRevision}` },
+			],
+			unknownCount: 1,
+		});
+		const result = await store.cleanupResidue(residue.candidates);
+		expect(result).toEqual({
+			deleted: [probeName, `revisions/${staleRevision}`],
+			failed: [],
+			retained: [],
+		});
+		expect(await gateway.exists(probePath)).toBe(false);
+		expect(await gateway.exists(staleRevisionPath)).toBe(false);
+		expect(
+			await gateway.exists(parseRemotePath(`${root}/revisions/${published.manifest.revision}`)),
+		).toBe(true);
+		expect(await gateway.exists(parseRemotePath(`${root}/legacy.txt`))).toBe(true);
+	});
+
+	it('retains a revision that becomes active after residue inspection', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [],
+		});
+		const becomingActive = generateRevisionId();
+		const revisionPath = parseRemotePath(`${root}/revisions/${becomingActive}`);
+		await gateway.createDirectory(revisionPath);
+		const residue = await store.inspectResidue();
+		expect(residue.candidates).toEqual([{ kind: 'revision', path: `revisions/${becomingActive}` }]);
+		await gateway.writeFile(
+			parseRemotePath(`${root}/manifest.json`),
+			Buffer.from(JSON.stringify({ files: [], revision: becomingActive, version: 1 }), 'utf8'),
+		);
+
+		await expect(store.cleanupResidue(residue.candidates)).resolves.toEqual({
+			deleted: [],
+			failed: [],
+			retained: [`revisions/${becomingActive}`],
+		});
+		expect(await gateway.exists(revisionPath)).toBe(true);
+	});
+
+	it('retains residue when the managed manifest can no longer be verified', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const probeName = `.pi-sync-webdav-probe-${generateRevisionId()}`;
+		const probePath = parseRemotePath(`${root}/${probeName}`);
+		await gateway.createDirectory(probePath);
+		await gateway.writeFile(parseRemotePath(`${root}/manifest.json`), Buffer.from('not json'));
+
+		const residue = await store.inspectResidue();
+		expect(residue.candidates).toEqual([{ kind: 'probe', path: probeName }]);
+		await expect(store.cleanupResidue(residue.candidates)).resolves.toEqual({
+			deleted: [],
+			failed: [],
+			retained: [probeName],
+		});
+		expect(await gateway.exists(probePath)).toBe(true);
+	});
+
+	it('cancels cleanup before deleting a verified residue candidate', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const probeName = `.pi-sync-webdav-probe-${generateRevisionId()}`;
+		const probePath = parseRemotePath(`${root}/${probeName}`);
+		await gateway.createDirectory(probePath);
+		const residue = await store.inspectResidue();
+		const controller = new AbortController();
+
+		await expect(
+			store.cleanupResidue(residue.candidates, {
+				onProgress: () => controller.abort(),
+				signal: controller.signal,
+			}),
+		).rejects.toThrow('WebDAV request cancelled');
+		expect(await gateway.exists(probePath)).toBe(true);
+	});
+
+	it('retains a revision when manifest write failure leaves activation uncertain', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const manifestPath = parseRemotePath(`${root}/manifest.json`);
+		const failingGateway: WebDavGateway = {
+			createDirectory: (path, options) => gateway.createDirectory(path, options),
+			deletePath: (path, options) => gateway.deletePath(path, options),
+			directoryContents: (path, options) => gateway.directoryContents(path, options),
+			exists: (path, options) => gateway.exists(path, options),
+			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
+			writeFile: async (path, contents, onProgress, options) => {
+				if (path === manifestPath) {
+					throw new WebDavRequestError('WebDAV network request failed', { retryable: false });
+				}
+				await gateway.writeFile(path, contents, onProgress, options);
+			},
+		};
+
+		await expect(
+			new RemoteStore(failingGateway, root).publishRevision({
+				allowUnverifiedManifest: false,
+				expectedManifestSha256: undefined,
+				files: [{ contents: Buffer.from('new', 'utf8'), path: parseManifestPath('settings.json') }],
+			}),
+		).rejects.toBeInstanceOf(RemoteCommitUnknownError);
+		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toHaveLength(1);
+	});
+
 	it('reports a failed capability probe without treating the connection as writable', async () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
@@ -305,6 +503,69 @@ describe('remote store', () => {
 			canWrite: false,
 			cleanupFailed: false,
 			error: expect.objectContaining({ status: 403 }),
+		});
+	});
+
+	it('cleans a probe when directory creation has an unknown outcome', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const uncertainGateway: WebDavGateway = {
+			createDirectory: async (path) => {
+				if (path.includes('.pi-sync-webdav-probe-')) {
+					await gateway.createDirectory(path);
+					throw new WebDavRequestError('WebDAV network request failed', { retryable: false });
+				}
+				await gateway.createDirectory(path);
+			},
+			deletePath: (path) => gateway.deletePath(path),
+			directoryContents: (path) => gateway.directoryContents(path),
+			exists: (path) => gateway.exists(path),
+			readFile: (path, onProgress) => gateway.readFile(path, onProgress),
+			writeFile: (path, contents, onProgress) => gateway.writeFile(path, contents, onProgress),
+		};
+
+		await expect(new RemoteStore(uncertainGateway, root).verifyWriteCapability()).resolves.toEqual({
+			canWrite: false,
+			cleanupFailed: false,
+			error: expect.objectContaining({ message: 'WebDAV network request failed' }),
+		});
+		expect(await store.inspectRoot()).toEqual({ kind: 'empty' });
+	});
+
+	it('reports probe cleanup failure when capability validation is cancelled', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const controller = new AbortController();
+		const cancelledGateway: WebDavGateway = {
+			createDirectory: (path, options) => gateway.createDirectory(path, options),
+			deletePath: async (path) => {
+				if (path.includes('.pi-sync-webdav-probe-')) {
+					throw new WebDavRequestError('WebDAV authorization failed', {
+						retryable: false,
+						status: 403,
+					});
+				}
+				await gateway.deletePath(path);
+			},
+			directoryContents: (path, options) => gateway.directoryContents(path, options),
+			exists: (path, options) => gateway.exists(path, options),
+			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
+			writeFile: async (path) => {
+				if (path.includes('.pi-sync-webdav-probe-')) {
+					controller.abort();
+					throw new WebDavRequestError('WebDAV request cancelled', { retryable: false });
+				}
+				throw new Error('Unexpected write request');
+			},
+		};
+
+		const error = await new RemoteStore(cancelledGateway, root)
+			.verifyWriteCapability({ signal: controller.signal })
+			.catch((failure: unknown) => failure);
+		expect(error).toBeInstanceOf(WriteCapabilityProbeCancelledError);
+		expect(error).toMatchObject({
+			cleanupFailed: true,
+			message: 'WebDAV request cancelled',
 		});
 	});
 

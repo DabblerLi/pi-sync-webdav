@@ -42,8 +42,8 @@ pi update --extensions
 
 完成配置后，可从仪表盘选择 **settings**，或执行 `/sync-webdav settings`：
 
-- **Connection**：修改 URL、远端路径、用户名和密码。完整连接会在保存前验证。
-- **Push selection**：只修改本地选择范围，不会连接 WebDAV。
+- **Connection**：修改 URL、远端路径、用户名和密码。保存前会检查完整连接的读取权限和写入能力。可读取但不可写入的目标会保存为只读模式。
+- **Push selection**：只修改本地选择范围，不会连接 WebDAV，保存前还会显示最终复核。
 
 修改连接不会自动 push 或 pull；请自行选择 `push` 或 `pull`。
 
@@ -57,7 +57,11 @@ pi update --extensions
 
 发现变更时，push 和 pull 会显示计划并要求确认。Pull 会在修改本地文件前验证完整下载，并为被覆盖或删除的文件创建本地备份。
 
-文件应用后，会处理 `settings.json` 中的 package 声明。若包操作失败，已拉取文件会保留，Pi 会提示你手动处理该包。
+耗时的交互式操作会显示进度。按 Esc 可请求取消。
+
+可写连接的仪表盘提供 **Clean remote residue**。该操作只会删除已识别的过期同步数据；无法识别的远端项会保留。
+
+文件应用后，会处理 `settings.json` 中的 package 声明。若包操作失败，或取消请求中断这一步，已拉取文件会保留，Pi 会提示你手动处理该包。
 
 不保留远端历史，也不提供远端 restore 操作。
 

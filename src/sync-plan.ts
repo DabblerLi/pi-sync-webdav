@@ -9,14 +9,16 @@ import {
 	type ManifestFile,
 	type ManifestV1,
 } from './manifest.js';
+import { throwIfOperationCancelled, type OperationOptions } from './operation.js';
 import { assertSafeLocalTarget, parseManifestPath, type SafeRelativePath } from './paths.js';
 import type { RemoteManifestSnapshot } from './remote-store.js';
 import type { CollectedLocalFile, LocalSelection } from './selection.js';
 import { readRegularFileSnapshot } from './safe-files.js';
 
-export type PlannedAction = 'add' | 'delete' | 'update';
+export type PlannedAction = 'add' | 'delete' | 'secure' | 'update';
 
 export interface LocalFileObservation {
+	readonly mode: number;
 	readonly path: SafeRelativePath;
 	readonly sha256: string;
 	readonly size: number;
@@ -59,6 +61,7 @@ export interface PlanPullInput {
 	readonly caseInsensitiveDestination?: boolean;
 	readonly connectionFingerprint: string;
 	readonly manifest: ManifestV1;
+	readonly operation?: OperationOptions;
 	readonly syncState: SyncState | undefined;
 }
 
@@ -96,31 +99,49 @@ function localDestinationKey(path: SafeRelativePath, caseInsensitiveDestination:
 	return caseInsensitiveDestination ? path.toLocaleLowerCase('en-US') : path;
 }
 
+interface DestinationPathNode {
+	readonly children: Map<string, DestinationPathNode>;
+	terminal: boolean;
+}
+
+function destinationPathNode(): DestinationPathNode {
+	return { children: new Map(), terminal: false };
+}
+
 function assertNoLocalDestinationCollisions(
 	paths: readonly SafeRelativePath[],
 	caseInsensitiveDestination: boolean,
+	errorMessage = 'Remote manifest contains colliding local paths',
 ): void {
-	const destinations = paths
-		.map((path) => ({ key: localDestinationKey(path, caseInsensitiveDestination), path }))
-		.sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
-	for (let index = 1; index < destinations.length; index += 1) {
-		const previous = destinations[index - 1];
-		const current = destinations[index];
-		if (
-			previous !== undefined &&
-			current !== undefined &&
-			(current.key === previous.key || current.key.startsWith(`${previous.key}/`))
-		) {
-			throw new Error('Remote manifest contains colliding local paths');
+	const root = destinationPathNode();
+	for (const path of paths) {
+		let node = root;
+		for (const component of localDestinationKey(path, caseInsensitiveDestination).split('/')) {
+			if (node.terminal) {
+				throw new Error(errorMessage);
+			}
+			let child = node.children.get(component);
+			if (child === undefined) {
+				child = destinationPathNode();
+				node.children.set(component, child);
+			}
+			node = child;
 		}
+		if (node.terminal || node.children.size > 0) {
+			throw new Error(errorMessage);
+		}
+		node.terminal = true;
 	}
 }
 
 async function observeLocalFile(
 	agentRoot: string,
 	path: SafeRelativePath,
+	operation?: OperationOptions,
 ): Promise<LocalFileObservation | undefined> {
+	throwIfOperationCancelled(operation?.signal);
 	const target = await assertSafeLocalTarget(agentRoot, path);
+	throwIfOperationCancelled(operation?.signal);
 	let entry;
 	try {
 		entry = await lstat(target);
@@ -144,7 +165,8 @@ async function observeLocalFile(
 	if (contents === undefined) {
 		return undefined;
 	}
-	return { path, sha256: sha256(contents), size: contents.byteLength };
+	throwIfOperationCancelled(operation?.signal);
+	return { mode: entry.mode, path, sha256: sha256(contents), size: contents.byteLength };
 }
 
 function toRemoteManifestFiles(
@@ -168,6 +190,11 @@ export function planPush(input: {
 	if (localByPath.size !== localFiles.length) {
 		throw new Error('Duplicate local selection path');
 	}
+	assertNoLocalDestinationCollisions(
+		localFiles.map((file) => file.path),
+		true,
+		'Local selection contains colliding destinations',
+	);
 	const remoteByPath = toRemoteManifestFiles(input.remote);
 	const actions: FileMutation[] = [];
 
@@ -220,16 +247,48 @@ export function planPush(input: {
 }
 
 export async function planPull(input: PlanPullInput): Promise<PullPlan> {
+	throwIfOperationCancelled(input.operation?.signal);
+	input.operation?.onProgress?.({ phase: 'preparing' });
+	throwIfOperationCancelled(input.operation?.signal);
 	const manifest = validateManifest(input.manifest);
-	const caseInsensitiveDestination =
-		input.caseInsensitiveDestination ??
-		(process.platform === 'darwin' || process.platform === 'win32');
+	const caseInsensitiveDestination = input.caseInsensitiveDestination ?? true;
 	assertNoLocalDestinationCollisions(
 		manifest.files.map((file) => file.path),
 		caseInsensitiveDestination,
 	);
 
 	const manifestPaths = new Set(manifest.files.map((file) => file.path));
+	const manifestPathsByDestination = new Map(
+		manifest.files.map((file) => [
+			localDestinationKey(file.path, caseInsensitiveDestination),
+			file.path,
+		]),
+	);
+	const deletionCandidates: SafeRelativePath[] = [];
+	if (
+		input.syncState !== undefined &&
+		input.syncState.connectionFingerprint === input.connectionFingerprint
+	) {
+		for (const rawPath of input.syncState.managedPaths) {
+			const path = parseManifestPath(rawPath);
+			const manifestPath = manifestPathsByDestination.get(
+				localDestinationKey(path, caseInsensitiveDestination),
+			);
+			if (manifestPath !== undefined) {
+				if (manifestPath !== path) {
+					throw new Error('Managed paths collide with remote local destinations');
+				}
+				continue;
+			}
+			deletionCandidates.push(path);
+		}
+	}
+	assertNoLocalDestinationCollisions(
+		[...manifest.files.map((file) => file.path), ...deletionCandidates],
+		caseInsensitiveDestination,
+		'Managed paths collide with remote local destinations',
+	);
+
 	const actions: FileMutation[] = [];
 	let observedLocalBytes = 0;
 	const countObservedBytes = (local: LocalFileObservation | undefined): void => {
@@ -242,7 +301,8 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 		}
 	};
 	for (const file of manifest.files) {
-		const local = await observeLocalFile(input.agentRoot, file.path);
+		throwIfOperationCancelled(input.operation?.signal);
+		const local = await observeLocalFile(input.agentRoot, file.path, input.operation);
 		countObservedBytes(local);
 		if (local === undefined) {
 			actions.push({
@@ -260,19 +320,25 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 				path: file.path,
 				source: file,
 			});
+			continue;
+		}
+		if (
+			file.path === 'auth.json' &&
+			(process.platform === 'win32' || (local.mode & 0o777) !== 0o600)
+		) {
+			actions.push({
+				action: 'secure',
+				expectedLocal: expectedFromObservation(local),
+				path: file.path,
+				source: file,
+			});
 		}
 	}
 
-	if (
-		input.syncState !== undefined &&
-		input.syncState.connectionFingerprint === input.connectionFingerprint
-	) {
-		for (const rawPath of input.syncState.managedPaths) {
-			const path = parseManifestPath(rawPath);
-			if (manifestPaths.has(path)) {
-				continue;
-			}
-			const local = await observeLocalFile(input.agentRoot, path);
+	if (deletionCandidates.length > 0) {
+		for (const path of deletionCandidates) {
+			throwIfOperationCancelled(input.operation?.signal);
+			const local = await observeLocalFile(input.agentRoot, path, input.operation);
 			countObservedBytes(local);
 			if (local !== undefined) {
 				actions.push({

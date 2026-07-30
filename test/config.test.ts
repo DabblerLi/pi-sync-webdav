@@ -106,6 +106,24 @@ describe('private configuration', () => {
 		await expect(readConfig(root)).rejects.toThrow('Invalid plugin configuration');
 	});
 
+	it('rejects unsafe persisted managed paths before writing configuration', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
+		temporaryDirectories.push(root);
+		const config = createConfig();
+
+		await expect(
+			writeConfig(root, {
+				...config,
+				syncState: {
+					...config.syncState,
+					managedPaths: [
+						'themes/settings:stream',
+					] as unknown as typeof config.syncState.managedPaths,
+				},
+			}),
+		).rejects.toThrow('Invalid plugin configuration');
+	});
+
 	it('validates before replacing an existing configuration', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
 		temporaryDirectories.push(root);

@@ -95,6 +95,24 @@ describe('package synchronization planning', () => {
 				{ action: 'install', source: 'git:gitlab:acme/other#v1' },
 			],
 		});
+		await expect(
+			planPackageSync({
+				after: ['git:github:acme/plugin#feature/sync'],
+				agentRoot: root,
+				before: ['git:github:acme/plugin#main'],
+			}),
+		).resolves.toEqual({
+			operations: [{ action: 'update', source: 'git:github:acme/plugin#feature/sync' }],
+		});
+		await expect(
+			planPackageSync({
+				after: ['git:github:acme/plugin#semver:^1.2.0'],
+				agentRoot: root,
+				before: ['git:github:acme/plugin#v1'],
+			}),
+		).resolves.toEqual({
+			operations: [{ action: 'update', source: 'git:github:acme/plugin#semver:^1.2.0' }],
+		});
 	});
 
 	it('requires desired local package paths to exist', async () => {
@@ -134,6 +152,21 @@ describe('package synchronization planning', () => {
 				before: [],
 			}),
 		).rejects.toThrow('Invalid Pi package source');
+		for (const source of [
+			'https://example.com/acme/plugin@https://token@example.com/x',
+			'https://example.com/acme/plugin@https%253A%252F%252Ftoken%2540example.com%252Fx',
+		]) {
+			const credentialedGitRefPlan = planPackageSync({
+				after: [source],
+				agentRoot: root,
+				before: [],
+			});
+			await expect(credentialedGitRefPlan).rejects.toThrow('Invalid Pi package source');
+			await credentialedGitRefPlan.catch((error: unknown) => {
+				expect(error).toBeInstanceOf(Error);
+				expect((error as Error).message).not.toContain('token');
+			});
+		}
 		await expect(
 			planPackageSync({
 				after: ['git:alice:secret@example.com/acme/plugin@v1'],
@@ -141,6 +174,41 @@ describe('package synchronization planning', () => {
 				before: [],
 			}),
 		).rejects.toThrow('Invalid Pi package source');
+		const hostedQueryPlan = planPackageSync({
+			after: ['git:github:acme/plugin?access_token=private'],
+			agentRoot: root,
+			before: [],
+		});
+		await expect(hostedQueryPlan).rejects.toThrow('Invalid Pi package source');
+		await hostedQueryPlan.catch((error: unknown) => {
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).not.toContain('access_token');
+		});
+		for (const source of [
+			'git:github:token@acme/plugin#v1',
+			'git:gitlab:acme%40token/plugin#v1',
+			'git:bitbucket:acme:token/plugin#v1',
+			'git:github:acme/plugin#https://token@example.com/x',
+			'git:github:acme/plugin#https%3A%2F%2Ftoken%40example.com%2Fx',
+			'git:github:acme%2540token/plugin#v1',
+			'git:github:acme/plugin#https%253A%252F%252Ftoken%2540example.com%252Fx',
+		]) {
+			const credentialedGitPlan = planPackageSync({ after: [source], agentRoot: root, before: [] });
+			await expect(credentialedGitPlan).rejects.toThrow('Invalid Pi package source');
+			await credentialedGitPlan.catch((error: unknown) => {
+				expect(error).toBeInstanceOf(Error);
+				expect((error as Error).message).not.toContain('token');
+			});
+		}
+		await expect(
+			planPackageSync({
+				after: ['git:bitbucket:acme/plugin#v1'],
+				agentRoot: root,
+				before: [],
+			}),
+		).resolves.toEqual({
+			operations: [{ action: 'install', source: 'git:bitbucket:acme/plugin#v1' }],
+		});
 		await expect(
 			planPackageSync({
 				after: ['https://example.com/%2e%2e/plugin'],
@@ -155,6 +223,19 @@ describe('package synchronization planning', () => {
 				before: [],
 			}),
 		).rejects.toThrow('Invalid Pi package source');
+		for (const source of [
+			'npm:example@github:token@acme/plugin',
+			'npm:example@github%3Atoken%40acme%2Fplugin',
+			'npm:example@https%253A%252F%252Ftoken%2540registry.example%252Fpackage.tgz',
+			'npm:example@git+ssh://token@example.com/acme/plugin',
+		]) {
+			const credentialedNpmPlan = planPackageSync({ after: [source], agentRoot: root, before: [] });
+			await expect(credentialedNpmPlan).rejects.toThrow('Invalid Pi package source');
+			await credentialedNpmPlan.catch((error: unknown) => {
+				expect(error).toBeInstanceOf(Error);
+				expect((error as Error).message).not.toContain('token');
+			});
+		}
 		const npmCredentialedPlan = planPackageSync({
 			after: ['npm:example@https://token@registry.example/package.tgz'],
 			agentRoot: root,
@@ -211,6 +292,34 @@ describe('package operation execution', () => {
 			],
 		});
 		expect(calls).toEqual(['install:npm:working', 'install:npm:broken', 'remove:npm:removed']);
+	});
+
+	it('stops before later package operations when cancellation is requested', async () => {
+		const controller = new AbortController();
+		const calls: string[] = [];
+		const packageManager = {
+			install: async (source: string): Promise<void> => {
+				calls.push(source);
+				controller.abort();
+			},
+			remove: async (): Promise<void> => undefined,
+		};
+
+		await expect(
+			applyPackageOperations(
+				packageManager,
+				[
+					{ action: 'install', source: 'npm:first' },
+					{ action: 'install', source: 'npm:second' },
+				],
+				{ signal: controller.signal },
+			),
+		).resolves.toMatchObject({
+			cancelled: true,
+			failureMessage: 'One or more Pi package operations failed. Resolve them manually.',
+			succeeded: [{ action: 'install', source: 'npm:first' }],
+		});
+		expect(calls).toEqual(['npm:first']);
 	});
 
 	it('reads global package declarations through Pi SettingsManager', async () => {

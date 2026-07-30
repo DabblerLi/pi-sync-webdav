@@ -5,6 +5,7 @@ import { basename, join, resolve } from 'node:path';
 import type { ManifestFile, ManifestV1 } from './manifest.js';
 import { MAX_FILE_BYTES, MAX_OPERATION_BYTES, validateManifest } from './manifest.js';
 import { getPrivatePaths, parseManifestPath, type SafeRelativePath } from './paths.js';
+import { throwIfOperationCancelled, type OperationOptions } from './operation.js';
 import { readRegularFileSnapshot } from './safe-files.js';
 import type { ExpectedLocalState, PullPlan } from './sync-plan.js';
 
@@ -371,10 +372,13 @@ async function readStagedFile(
 async function walkRegularFiles(
 	root: string,
 	prefix: SafeRelativePath | undefined,
+	operation?: OperationOptions,
 ): Promise<readonly BackupFile[]> {
+	throwIfOperationCancelled(operation?.signal);
 	const entries = await fs.readdir(root);
 	const files: BackupFile[] = [];
 	for (const name of entries.sort()) {
+		throwIfOperationCancelled(operation?.signal);
 		const path =
 			prefix === undefined ? parseManifestPath(name) : parseManifestPath(`${prefix}/${name}`);
 		const absolutePath = join(root, name);
@@ -383,7 +387,7 @@ async function walkRegularFiles(
 			throw new Error('Unsafe private file');
 		}
 		if (entry.isDirectory()) {
-			files.push(...(await walkRegularFiles(absolutePath, path)));
+			files.push(...(await walkRegularFiles(absolutePath, path, operation)));
 			continue;
 		}
 		if (!entry.isFile()) {
@@ -408,10 +412,12 @@ async function verifyWorkspaceFiles(
 	agentRoot: string,
 	workspace: PullWorkspace,
 	files: readonly ManifestFile[],
+	operation?: OperationOptions,
 ): Promise<void> {
+	throwIfOperationCancelled(operation?.signal);
 	const expected = new Map(files.map((file) => [file.path, file]));
 	const workspaceDirectory = await getWorkspaceDirectory(agentRoot, workspace);
-	const stagedFiles = await walkRegularFiles(workspaceDirectory, undefined);
+	const stagedFiles = await walkRegularFiles(workspaceDirectory, undefined, operation);
 	if (
 		stagedFiles.length !== expected.size ||
 		stagedFiles.some((file) => expected.get(file.path) === undefined)
@@ -419,6 +425,7 @@ async function verifyWorkspaceFiles(
 		throw new Error('Pull workspace does not match the manifest');
 	}
 	for (const file of stagedFiles) {
+		throwIfOperationCancelled(operation?.signal);
 		const expectedFile = expected.get(file.path);
 		if (
 			expectedFile === undefined ||
@@ -512,7 +519,9 @@ export async function stageVerifiedFile(
 	workspace: PullWorkspace,
 	file: ManifestFile,
 	contents: Buffer,
+	operation?: OperationOptions,
 ): Promise<void> {
+	throwIfOperationCancelled(operation?.signal);
 	const path = parseManifestPath(file.path);
 	verifyContents(file, contents);
 	const workspaceDirectory = await getWorkspaceDirectory(agentRoot, workspace);
@@ -533,36 +542,60 @@ export async function stageVerifiedFile(
 		throw new Error('Missing staged file');
 	}
 	verifyContents(file, stagedContents);
+	throwIfOperationCancelled(operation?.signal);
 }
 
 export async function sealPullWorkspace(
 	agentRoot: string,
 	workspace: PullWorkspace,
 	manifest: ManifestV1,
+	operation?: OperationOptions,
 ): Promise<void> {
+	throwIfOperationCancelled(operation?.signal);
 	const validatedManifest = validateManifest(manifest);
-	await verifyWorkspaceFiles(agentRoot, workspace, validatedManifest.files);
+	await verifyWorkspaceFiles(agentRoot, workspace, validatedManifest.files, operation);
 }
 
 export async function applyPullPlan(
 	agentRoot: string,
 	workspace: PullWorkspace,
 	plan: PullPlan,
+	operation?: OperationOptions,
 ): Promise<ApplyResult> {
-	await verifyWorkspaceFiles(agentRoot, workspace, plan.downloads);
+	throwIfOperationCancelled(operation?.signal);
+	await verifyWorkspaceFiles(agentRoot, workspace, plan.downloads, operation);
 	const mutations: AppliedMutation[] = [];
 	try {
 		if (new Set(plan.actions.map((mutation) => mutation.path)).size !== plan.actions.length) {
 			throw new Error('Duplicate pull mutation path');
 		}
 		for (const mutation of plan.actions) {
+			throwIfOperationCancelled(operation?.signal);
+			operation?.onProgress?.({
+				completed: mutations.length + 1,
+				phase: 'applying',
+				total: plan.actions.length,
+			});
+			throwIfOperationCancelled(operation?.signal);
 			const previous = await readActiveSnapshot(agentRoot, mutation.path, mutation.expectedLocal);
+			throwIfOperationCancelled(operation?.signal);
+			if (mutation.action === 'secure') {
+				if (mutation.path !== 'auth.json' || previous === undefined) {
+					throw new Error('Local target changed');
+				}
+				const root = assertSafeAgentRoot(agentRoot);
+				const target = toAbsolutePath(root, mutation.path);
+				await fs.chmod(target, 0o600);
+				continue;
+			}
 			if (mutation.action === 'delete') {
 				if (previous === undefined) {
 					throw new Error('Local target changed');
 				}
 				await writePersistentBackup(agentRoot, previous);
+				throwIfOperationCancelled(operation?.signal);
 				await readActiveSnapshot(agentRoot, mutation.path, mutation.expectedLocal);
+				throwIfOperationCancelled(operation?.signal);
 				await deleteActiveFile(agentRoot, mutation.path);
 				mutations.push({ action: 'delete', path: mutation.path, previous });
 				continue;
@@ -571,10 +604,13 @@ export async function applyPullPlan(
 				throw new Error('Missing staged source file');
 			}
 			const contents = await readStagedFile(agentRoot, workspace, mutation.source);
+			throwIfOperationCancelled(operation?.signal);
 			if (previous !== undefined) {
 				await writePersistentBackup(agentRoot, previous);
+				throwIfOperationCancelled(operation?.signal);
 			}
 			await readActiveSnapshot(agentRoot, mutation.path, mutation.expectedLocal);
+			throwIfOperationCancelled(operation?.signal);
 			try {
 				await writeActiveFile(agentRoot, mutation.path, contents, previous === undefined);
 				mutations.push({ action: mutation.action, path: mutation.path, previous });
@@ -618,7 +654,13 @@ export async function disposePullWorkspace(
 	await fs.rm(workspaceDirectory, { force: true, recursive: true });
 }
 
-export async function listBackups(agentRoot: string): Promise<readonly BackupFile[]> {
+export async function listBackups(
+	agentRoot: string,
+	operation?: OperationOptions,
+): Promise<readonly BackupFile[]> {
+	throwIfOperationCancelled(operation?.signal);
+	operation?.onProgress?.({ phase: 'restoring' });
+	throwIfOperationCancelled(operation?.signal);
 	const paths = await getExistingPrivateDirectory(agentRoot);
 	if (paths === undefined) {
 		return [];
@@ -634,7 +676,7 @@ export async function listBackups(agentRoot: string): Promise<readonly BackupFil
 		}
 		throw error;
 	}
-	const backups = await walkRegularFiles(paths.backupsDirectory, undefined);
+	const backups = await walkRegularFiles(paths.backupsDirectory, undefined, operation);
 	const totalBytes = backups.reduce((total, backup) => total + backup.size, 0);
 	if (totalBytes > MAX_OPERATION_BYTES) {
 		throw new Error('Backup files exceed the size limit');
@@ -645,9 +687,11 @@ export async function listBackups(agentRoot: string): Promise<readonly BackupFil
 export async function planRestore(
 	agentRoot: string,
 	backups: readonly BackupFile[],
+	operation?: OperationOptions,
 ): Promise<RestorePlan> {
 	const actions: RestoreMutation[] = [];
 	for (const backup of [...backups].sort((left, right) => comparePaths(left.path, right.path))) {
+		throwIfOperationCancelled(operation?.signal);
 		const current = await observeActiveSnapshot(agentRoot, backup.path);
 		const expectedLocal: ExpectedLocalState =
 			current === undefined
@@ -663,12 +707,24 @@ export async function planRestore(
 	return { actions };
 }
 
-export async function applyRestorePlan(agentRoot: string, plan: RestorePlan): Promise<ApplyResult> {
+export async function applyRestorePlan(
+	agentRoot: string,
+	plan: RestorePlan,
+	operation?: OperationOptions,
+): Promise<ApplyResult> {
+	throwIfOperationCancelled(operation?.signal);
 	const paths = await getPrivateDirectory(agentRoot);
 	await ensureSafeDirectory(paths.backupsDirectory, 0o700, 'Unsafe backup directory');
 	const mutations: AppliedMutation[] = [];
 	try {
 		for (const action of plan.actions) {
+			throwIfOperationCancelled(operation?.signal);
+			operation?.onProgress?.({
+				completed: mutations.length + 1,
+				phase: 'restoring',
+				total: plan.actions.length,
+			});
+			throwIfOperationCancelled(operation?.signal);
 			if (
 				!(await inspectSafeDirectories(
 					paths.backupsDirectory,
@@ -690,8 +746,11 @@ export async function applyRestorePlan(agentRoot: string, plan: RestorePlan): Pr
 				throw new Error('Missing backup file');
 			}
 			verifyContents(action.backup, backupContents);
+			throwIfOperationCancelled(operation?.signal);
 			const previous = await readActiveSnapshot(agentRoot, action.path, action.expectedLocal);
+			throwIfOperationCancelled(operation?.signal);
 			await readActiveSnapshot(agentRoot, action.path, action.expectedLocal);
+			throwIfOperationCancelled(operation?.signal);
 			try {
 				await writeActiveFile(agentRoot, action.path, backupContents, previous === undefined);
 				mutations.push({ action: action.action, path: action.path, previous });

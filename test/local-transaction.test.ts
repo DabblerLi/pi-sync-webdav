@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -169,6 +169,37 @@ describe('pull transaction', () => {
 		await disposePullWorkspace(root, workspace);
 	});
 
+	it('repairs auth.json permissions without rewriting matching contents or creating a backup', async () => {
+		if (process.platform === 'win32') {
+			return;
+		}
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		const authPath = join(root, 'auth.json');
+		await writeFile(authPath, 'private', 'utf8');
+		await chmod(authPath, 0o644);
+		const manifest = createManifest([{ contents: 'private', path: 'auth.json' }]);
+		const workspace = await stageManifest(root, manifest, new Map([['auth.json', 'private']]));
+		const plan: PullPlan = {
+			actions: [
+				{
+					action: 'secure',
+					expectedLocal: expected('private'),
+					path: parseManifestPath('auth.json'),
+					source: source(manifest, 'auth.json'),
+				},
+			],
+			downloads: manifest.files,
+			nextManagedPaths: manifest.files.map((file) => file.path),
+		};
+
+		await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({ status: 'applied' });
+		expect(await readFile(authPath, 'utf8')).toBe('private');
+		expect((await stat(authPath)).mode & 0o777).toBe(0o600);
+		await expect(listBackups(root)).resolves.toEqual([]);
+		await disposePullWorkspace(root, workspace);
+	});
+
 	it('rejects a workspace changed after sealing before mutating active files', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
 		temporaryDirectories.push(root);
@@ -242,6 +273,41 @@ describe('pull transaction', () => {
 
 		await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({ status: 'rolled-back' });
 		expect(await readFile(join(root, 'settings.json'), 'utf8')).toBe('old settings');
+	});
+
+	it('does not start a pull mutation when cancellation is requested by progress reporting', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		const manifest = createManifest([{ contents: 'new settings', path: 'settings.json' }]);
+		const workspace = await stageManifest(
+			root,
+			manifest,
+			new Map([['settings.json', 'new settings']]),
+		);
+		const plan: PullPlan = {
+			actions: [
+				{
+					action: 'add',
+					expectedLocal: { kind: 'absent' },
+					path: parseManifestPath('settings.json'),
+					source: source(manifest, 'settings.json'),
+				},
+			],
+			downloads: manifest.files,
+			nextManagedPaths: manifest.files.map((file) => file.path),
+		};
+		const controller = new AbortController();
+
+		await expect(
+			applyPullPlan(root, workspace, plan, {
+				onProgress: () => controller.abort(),
+				signal: controller.signal,
+			}),
+		).resolves.toEqual({ status: 'failed' });
+		await expect(readFile(join(root, 'settings.json'), 'utf8')).rejects.toMatchObject({
+			code: 'ENOENT',
+		});
+		await disposePullWorkspace(root, workspace);
 	});
 
 	it('rejects invalid staged bytes and reports no backups before the first pull', async () => {

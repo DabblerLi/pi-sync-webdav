@@ -122,9 +122,15 @@ function parseSyncState(value: unknown): SyncState {
 		invalidConfig();
 	}
 
+	let managedPaths: readonly SafeRelativePath[];
+	try {
+		managedPaths = parseUniquePaths(value.managedPaths, parseManifestPath);
+	} catch {
+		invalidConfig();
+	}
 	return {
 		connectionFingerprint,
-		managedPaths: parseUniquePaths(value.managedPaths, parseManifestPath),
+		managedPaths,
 	};
 }
 

@@ -1,5 +1,4 @@
 import {
-	BorderedLoader,
 	getAgentDir,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
@@ -8,7 +7,12 @@ import {
 import { connectionFingerprint, readConfig, writeConfig, type PluginConfig } from './config.js';
 import { applyRestorePlan, listBackups, planRestore } from './local-transaction.js';
 import { parseRemotePath, normalizeConnection, type NormalizedConnection } from './paths.js';
-import { RemoteStore } from './remote-store.js';
+import type { OperationOptions, OperationProgress } from './operation.js';
+import {
+	RemoteStore,
+	WriteCapabilityProbeCancelledError,
+	type RemoteOperationOptions,
+} from './remote-store.js';
 import { promptSecret } from './secret-input.js';
 import {
 	collectLocalSelection,
@@ -17,22 +21,51 @@ import {
 } from './selection.js';
 import {
 	applyStagedPull,
-	discardStagedPull,
 	preparePull,
 	preparePush,
 	publishPreparedPush,
 	stagePreparedPull,
-	type StagedPull,
 } from './sync-service.js';
 import { planPush } from './sync-plan.js';
 import { createWebDavGateway } from './webdav.js';
-import { confirmSyncPlan, formatPlanLines, selectPushIncludes } from './ui.js';
+import {
+	confirmPushSelection,
+	confirmSyncPlan,
+	formatPlanLines,
+	runCancellableOperation,
+	selectPushIncludes,
+} from './ui.js';
 
 const SUBCOMMANDS = ['settings', 'status', 'diff', 'push', 'pull', 'restore'] as const;
 const SETTINGS_OPTIONS = ['Connection', 'Push selection', 'Cancel'] as const;
 const PASSWORD_OPTIONS = ['Keep current password', 'Change password', 'Cancel'] as const;
+const CLEANUP_OPTION = 'Clean remote residue';
 
 type SyncWebdavSubcommand = (typeof SUBCOMMANDS)[number] | 'dashboard';
+
+function toRemoteOperationOptions(operation: OperationOptions): RemoteOperationOptions {
+	return {
+		...(operation.onProgress === undefined ? {} : { onProgress: operation.onProgress }),
+		...(operation.signal === undefined ? {} : { signal: operation.signal }),
+		onRetry: (retry) =>
+			operation.onProgress?.({
+				completed: retry.attempt,
+				phase: 'retrying',
+				total: retry.total,
+			}),
+	};
+}
+
+async function runCommandOperation<T>(
+	ctx: ExtensionCommandContext,
+	initialProgress: OperationProgress,
+	operation: (options: OperationOptions) => Promise<T>,
+): Promise<{ readonly cancelled: boolean; readonly value: T | undefined }> {
+	if (ctx.mode !== 'tui') {
+		return { cancelled: false, value: await operation({}) };
+	}
+	return runCancellableOperation(ctx, initialProgress, operation);
+}
 
 function createStore(config: PluginConfig): RemoteStore {
 	return new RemoteStore(
@@ -77,7 +110,7 @@ async function confirmOptionalPaths(
 		if (
 			!(await ctx.ui.confirm(
 				'Include sessions?',
-				'Session data may contain private conversation content. Continue?',
+				'Session data may contain private conversation content and can be large. Continue?',
 			))
 		) {
 			return false;
@@ -94,6 +127,20 @@ async function confirmOptionalPaths(
 		}
 	}
 	return true;
+}
+
+async function loadSelectionCandidates(
+	ctx: ExtensionCommandContext,
+	agentRoot: string,
+): Promise<Awaited<ReturnType<typeof listSelectionCandidates>> | undefined> {
+	const result = await runCommandOperation(ctx, { phase: 'preparing' }, (operation) =>
+		listSelectionCandidates(agentRoot, operation),
+	);
+	if (result.cancelled || result.value === undefined) {
+		ctx.ui.notify('Push selection cancelled.', 'info');
+		return undefined;
+	}
+	return result.value;
 }
 
 async function promptConnection(
@@ -158,16 +205,38 @@ async function saveConnection(
 	existing: PluginConfig | undefined,
 	connection: NormalizedConnection,
 	pushInclude: PluginConfig['pushInclude'],
-): Promise<PluginConfig> {
+): Promise<PluginConfig | undefined> {
 	const store = new RemoteStore(
 		createWebDavGateway(connection),
 		parseRemotePath(connection.remotePath),
 	);
-	const root = await store.ensureRoot();
-	if (root.kind === 'foreign') {
-		throw new Error('The remote root contains unrecognized files');
+	let cancelledProbeCleanupFailed = false;
+	const validation = await runCommandOperation(ctx, { phase: 'validating' }, async (operation) => {
+		try {
+			const root = await store.ensureRoot(toRemoteOperationOptions(operation));
+			if (root.kind === 'foreign') {
+				throw new Error('The remote root contains unrecognized files');
+			}
+			await store.verifyReadCapability(toRemoteOperationOptions(operation));
+			return store.verifyWriteCapability(toRemoteOperationOptions(operation));
+		} catch (error: unknown) {
+			if (error instanceof WriteCapabilityProbeCancelledError) {
+				cancelledProbeCleanupFailed = error.cleanupFailed;
+			}
+			throw error;
+		}
+	});
+	if (validation.cancelled || validation.value === undefined) {
+		ctx.ui.notify('Connection validation cancelled.', 'info');
+		if (cancelledProbeCleanupFailed) {
+			ctx.ui.notify(
+				'Remote validation residue may remain. Reopen WebDAV sync, then use dashboard cleanup.',
+				'warning',
+			);
+		}
+		return undefined;
 	}
-	const writeCapability = await store.verifyWriteCapability();
+	const writeCapability = validation.value;
 	const sameConnection =
 		existing !== undefined &&
 		connectionFingerprint(existing.connection) === connectionFingerprint(connection);
@@ -186,6 +255,9 @@ async function saveConnection(
 			: 'WebDAV connection saved in read-only mode.',
 		writeCapability.canWrite ? 'info' : 'warning',
 	);
+	if (writeCapability.cleanupFailed) {
+		ctx.ui.notify('Remote validation residue may remain. Use dashboard cleanup.', 'warning');
+	}
 	return config;
 }
 
@@ -197,9 +269,16 @@ async function runInitialConfiguration(
 	if (connection === undefined) {
 		return;
 	}
-	const candidates = await listSelectionCandidates(agentRoot);
+	const candidates = await loadSelectionCandidates(ctx, agentRoot);
+	if (candidates === undefined) {
+		return;
+	}
 	const pushInclude = await selectPushIncludes(ctx, candidates, DEFAULT_PUSH_INCLUDES);
-	if (pushInclude === undefined || !(await confirmOptionalPaths(ctx, pushInclude))) {
+	if (
+		pushInclude === undefined ||
+		!(await confirmOptionalPaths(ctx, pushInclude)) ||
+		!(await confirmPushSelection(ctx, pushInclude))
+	) {
 		return;
 	}
 	await saveConnection(ctx, agentRoot, undefined, connection, pushInclude);
@@ -220,14 +299,24 @@ async function runSettings(ctx: ExtensionCommandContext, agentRoot: string): Pro
 		if (choice === 'Connection') {
 			const connection = await promptConnection(ctx, config);
 			if (connection !== undefined) {
-				config = await saveConnection(ctx, agentRoot, config, connection, config.pushInclude);
+				const saved = await saveConnection(ctx, agentRoot, config, connection, config.pushInclude);
+				if (saved !== undefined) {
+					config = saved;
+				}
 			}
 			continue;
 		}
 
-		const candidates = await listSelectionCandidates(agentRoot);
+		const candidates = await loadSelectionCandidates(ctx, agentRoot);
+		if (candidates === undefined) {
+			continue;
+		}
 		const pushInclude = await selectPushIncludes(ctx, candidates, config.pushInclude);
-		if (pushInclude === undefined || !(await confirmOptionalPaths(ctx, pushInclude))) {
+		if (
+			pushInclude === undefined ||
+			!(await confirmOptionalPaths(ctx, pushInclude)) ||
+			!(await confirmPushSelection(ctx, pushInclude))
+		) {
 			continue;
 		}
 		config = { ...config, pushInclude };
@@ -239,28 +328,49 @@ async function runSettings(ctx: ExtensionCommandContext, agentRoot: string): Pro
 async function runStatus(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
 	const config = await requireConfig(agentRoot);
 	const store = createStore(config);
-	const root = await store.inspectRoot();
-	if (root.kind === 'managed') {
-		await store.readManifest();
+	const result = await runCommandOperation(ctx, { phase: 'validating' }, async (operation) => {
+		const remoteOperation = toRemoteOperationOptions(operation);
+		const root = await store.inspectRoot(remoteOperation);
+		await store.verifyReadCapability(remoteOperation);
+		const manifest =
+			root.kind === 'managed' ? await store.readManifest(remoteOperation) : undefined;
+		return { manifest, root };
+	});
+	if (result.cancelled || result.value === undefined) {
+		ctx.ui.notify('Status check cancelled.', 'info');
+		return;
 	}
-	ctx.ui.notify(`Remote status: ${root.kind}.`, 'info');
+	ctx.ui.notify(
+		`Remote status: ${result.value.root.kind}; read access available; manifest ${
+			result.value.manifest === undefined ? 'not found' : 'available'
+		}.`,
+		'info',
+	);
 }
 
 async function runDiff(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
 	const config = await requireConfig(agentRoot);
 	const store = createStore(config);
-	const [remote, selection] = await Promise.all([
-		store.readManifest(),
-		collectLocalSelection({ agentRoot, includes: config.pushInclude }),
-	]);
-	const plan = planPush({ local: selection, remote });
+	const result = await runCommandOperation(ctx, { phase: 'preparing' }, async (operation) => {
+		const [remote, selection] = await Promise.all([
+			store.readManifest(toRemoteOperationOptions(operation)),
+			collectLocalSelection({ agentRoot, includes: config.pushInclude, operation }),
+		]);
+		return { plan: planPush({ local: selection, remote }), selection };
+	});
+	if (result.cancelled || result.value === undefined) {
+		ctx.ui.notify('Diff cancelled.', 'info');
+		return;
+	}
 	const lines = formatPlanLines({
-		files: plan.actions,
+		files: result.value.plan.actions,
 		warnings: [
-			...(selection.secretWarningPaths.length > 0
+			...(result.value.selection.secretWarningPaths.length > 0
 				? ['Selected text may contain credentials.']
 				: []),
-			...(selection.skippedSymlinkPaths.length > 0 ? ['Symbolic links were skipped.'] : []),
+			...(result.value.selection.skippedSymlinkPaths.length > 0
+				? ['Symbolic links were skipped.']
+				: []),
 		],
 	});
 	ctx.ui.notify(lines.length === 0 ? 'No changes.' : lines.join('\n'), 'info');
@@ -276,7 +386,14 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 		ctx.ui.notify('Push is unavailable because the remote connection is read-only.', 'warning');
 		return;
 	}
-	const preparation = await preparePush({ agentRoot, config, store });
+	const prepared = await runCommandOperation(ctx, { phase: 'preparing' }, (operation) =>
+		preparePush({ agentRoot, config, store }, operation),
+	);
+	if (prepared.cancelled || prepared.value === undefined) {
+		ctx.ui.notify('Push cancelled.', 'info');
+		return;
+	}
+	const preparation = prepared.value;
 	if (preparation.plan.actions.length === 0) {
 		ctx.ui.notify('No changes to push.', 'info');
 		return;
@@ -305,79 +422,71 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 	) {
 		return;
 	}
-	const writeCapability = await store.verifyWriteCapability();
-	if (!writeCapability.canWrite) {
+	let cancelledProbeCleanupFailed = false;
+	const published = await runCommandOperation(ctx, { phase: 'validating' }, async (operation) => {
+		try {
+			const writeCapability = await store.verifyWriteCapability(
+				toRemoteOperationOptions(operation),
+			);
+			if (!writeCapability.canWrite) {
+				return { kind: 'read-only' as const, writeCapability };
+			}
+			return {
+				kind: 'published' as const,
+				result: await publishPreparedPush(agentRoot, preparation, {
+					allowUnverifiedManifest: preparation.requiresUnverifiedManifestConfirmation,
+					operation,
+				}),
+			};
+		} catch (error: unknown) {
+			if (error instanceof WriteCapabilityProbeCancelledError) {
+				cancelledProbeCleanupFailed = error.cleanupFailed;
+			}
+			throw error;
+		}
+	});
+	if (published.value?.kind === 'read-only') {
 		await writeConfig(agentRoot, {
 			...config,
 			connection: { ...config.connection, readOnly: true },
 		});
 		ctx.ui.notify('Push is unavailable because the remote connection is read-only.', 'warning');
+		if (published.value.writeCapability.cleanupFailed) {
+			ctx.ui.notify('Remote validation residue may remain. Use dashboard cleanup.', 'warning');
+		}
 		return;
 	}
-	await publishPreparedPush(agentRoot, preparation, {
-		allowUnverifiedManifest: preparation.requiresUnverifiedManifestConfirmation,
-	});
-	ctx.ui.notify('Configuration pushed.', 'info');
-}
-
-async function stagePullWithCancellation(
-	ctx: ExtensionCommandContext,
-	agentRoot: string,
-	preparation: Parameters<typeof stagePreparedPull>[1],
-): Promise<StagedPull | undefined> {
-	let cancelled = false;
-	let failure: unknown;
-	let failed = false;
-	const staged = await ctx.ui.custom<StagedPull | undefined>((tui, theme, _keybindings, done) => {
-		const loader = new BorderedLoader(tui, theme, 'Downloading configuration...');
-		let completed = false;
-		const finish = (result: StagedPull | undefined): void => {
-			if (!completed) {
-				completed = true;
-				done(result);
-			}
-		};
-		loader.onAbort = () => {
-			cancelled = true;
-			void operation.then(
-				async (result) => {
-					try {
-						await discardStagedPull(agentRoot, result);
-					} catch (error: unknown) {
-						failure = error;
-						failed = true;
-					}
-					finish(undefined);
-				},
-				() => finish(undefined),
-			);
-		};
-		const operation = stagePreparedPull(agentRoot, preparation, loader.signal);
-		void operation.then(
-			(result) => {
-				if (!cancelled) {
-					finish(result);
-				}
-			},
-			(error: unknown) => {
-				if (!cancelled) {
-					failure = error;
-					failed = true;
-				}
-				finish(undefined);
-			},
-		);
-		return loader;
-	});
-	if (failed) {
-		throw failure;
+	if (published.value === undefined) {
+		ctx.ui.notify('Push cancelled.', 'info');
+		if (cancelledProbeCleanupFailed) {
+			ctx.ui.notify('Remote validation residue may remain. Use dashboard cleanup.', 'warning');
+		}
+		return;
 	}
-	return staged;
+	if (published.value.result.previousRevisionCleanup === 'failed') {
+		ctx.ui.notify('A previous remote revision remains. Use dashboard cleanup.', 'warning');
+	} else if (published.value.result.previousRevisionCleanup === 'retained') {
+		ctx.ui.notify('A previous remote revision is active and was retained.', 'warning');
+	}
+	ctx.ui.notify(
+		published.cancelled
+			? 'Configuration pushed after the cancellation request.'
+			: 'Configuration pushed.',
+		published.cancelled ? 'warning' : 'info',
+	);
 }
 
 async function runPull(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
 	const config = await requireConfig(agentRoot);
-	const preparation = await preparePull({ agentRoot, config, store: createStore(config) });
+	const store = createStore(config);
+	const prepared = await runCommandOperation(ctx, { phase: 'preparing' }, (operation) =>
+		preparePull({ agentRoot, config, store }, undefined, operation),
+	);
+	if (prepared.cancelled || prepared.value === undefined) {
+		ctx.ui.notify('Pull cancelled.', 'info');
+		return;
+	}
+	const preparation = prepared.value;
 	if (preparation.plan.actions.length === 0 && preparation.packageOperations.length === 0) {
 		ctx.ui.notify('No changes to pull.', 'info');
 		return;
@@ -402,20 +511,40 @@ async function runPull(ctx: ExtensionCommandContext, agentRoot: string): Promise
 	) {
 		return;
 	}
-	const staged = await stagePullWithCancellation(ctx, agentRoot, preparation);
-	if (staged === undefined) {
+	const pulled = await runCommandOperation(ctx, { phase: 'downloading' }, async (operation) => {
+		const staged = await stagePreparedPull(agentRoot, preparation, operation);
+		return applyStagedPull(agentRoot, staged, undefined, operation);
+	});
+	if (pulled.value === undefined) {
 		ctx.ui.notify('Pull cancelled.', 'info');
 		return;
 	}
-	const result = await applyStagedPull(agentRoot, staged);
+	const result = pulled.value;
+	if (result.cancelled) {
+		ctx.ui.notify(
+			result.packages?.failureMessage ?? 'Pull cancelled after local files were applied.',
+			'warning',
+		);
+		return;
+	}
 	if (result.files.status !== 'applied') {
-		ctx.ui.notify('Local changes were not applied.', 'error');
+		ctx.ui.notify(
+			pulled.cancelled
+				? 'Pull cancelled before local changes completed.'
+				: 'Local changes were not applied.',
+			'error',
+		);
 		return;
 	}
 	if (result.packages?.failureMessage !== undefined) {
 		ctx.ui.notify(result.packages.failureMessage, 'warning');
 	} else {
-		ctx.ui.notify('Configuration pulled.', 'info');
+		ctx.ui.notify(
+			pulled.cancelled
+				? 'Configuration pulled after the cancellation request.'
+				: 'Configuration pulled.',
+			pulled.cancelled ? 'warning' : 'info',
+		);
 	}
 	if (
 		preparation.plan.actions.length > 0 &&
@@ -426,12 +555,19 @@ async function runPull(ctx: ExtensionCommandContext, agentRoot: string): Promise
 }
 
 async function runRestore(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
-	const backups = await listBackups(agentRoot);
-	if (backups.length === 0) {
+	const prepared = await runCommandOperation(ctx, { phase: 'restoring' }, async (operation) => {
+		const backups = await listBackups(agentRoot, operation);
+		return backups.length === 0 ? undefined : planRestore(agentRoot, backups, operation);
+	});
+	if (prepared.cancelled) {
+		ctx.ui.notify('Restore cancelled.', 'info');
+		return;
+	}
+	if (prepared.value === undefined) {
 		ctx.ui.notify('No local backups are available.', 'info');
 		return;
 	}
-	const plan = await planRestore(agentRoot, backups);
+	const plan = prepared.value;
 	if (
 		!(await confirmOptionalPaths(
 			ctx,
@@ -443,15 +579,87 @@ async function runRestore(ctx: ExtensionCommandContext, agentRoot: string): Prom
 	if (!(await confirmSyncPlan(ctx, 'Restore local backups?', { files: plan.actions }))) {
 		return;
 	}
-	const result = await applyRestorePlan(agentRoot, plan);
-	if (result.status !== 'applied') {
-		ctx.ui.notify('Local backups were not restored.', 'error');
+	const restored = await runCommandOperation(ctx, { phase: 'restoring' }, (operation) =>
+		applyRestorePlan(agentRoot, plan, operation),
+	);
+	if (restored.value === undefined) {
+		ctx.ui.notify('Restore cancelled.', 'info');
 		return;
 	}
-	ctx.ui.notify('Local backups restored.', 'info');
+	if (restored.value.status !== 'applied') {
+		ctx.ui.notify(
+			restored.cancelled
+				? 'Restore cancelled before local changes completed.'
+				: 'Local backups were not restored.',
+			'error',
+		);
+		return;
+	}
+	ctx.ui.notify(
+		restored.cancelled
+			? 'Local backups restored after the cancellation request.'
+			: 'Local backups restored.',
+		restored.cancelled ? 'warning' : 'info',
+	);
 	if (await ctx.ui.confirm('Reload Pi?', 'Reload Pi resources to apply restored configuration?')) {
 		await ctx.reload();
 	}
+}
+
+async function runCleanup(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
+	const config = await requireConfig(agentRoot);
+	if (config.connection.readOnly) {
+		ctx.ui.notify(
+			'Remote cleanup is unavailable because the remote connection is read-only.',
+			'warning',
+		);
+		return;
+	}
+	const store = createStore(config);
+	const inspected = await runCommandOperation(ctx, { phase: 'cleaning' }, (operation) =>
+		store.inspectResidue(toRemoteOperationOptions(operation)),
+	);
+	if (inspected.cancelled || inspected.value === undefined) {
+		ctx.ui.notify('Remote cleanup cancelled.', 'info');
+		return;
+	}
+	const residue = inspected.value;
+	if (residue.candidates.length === 0) {
+		ctx.ui.notify(
+			residue.unknownCount === 0
+				? 'No verified remote residue is available to clean.'
+				: 'No verified remote residue is available to clean. Unrecognized remote items were retained.',
+			'info',
+		);
+		return;
+	}
+	if (
+		!(await confirmSyncPlan(ctx, 'Clean remote residue?', {
+			files: residue.candidates.map((candidate) => ({
+				action: 'delete' as const,
+				path: candidate.path,
+			})),
+			warnings: residue.unknownCount === 0 ? [] : ['Unrecognized remote items will be retained.'],
+		}))
+	) {
+		return;
+	}
+	const cleaned = await runCommandOperation(ctx, { phase: 'cleaning' }, (operation) =>
+		store.cleanupResidue(residue.candidates, toRemoteOperationOptions(operation)),
+	);
+	if (cleaned.cancelled || cleaned.value === undefined) {
+		ctx.ui.notify('Remote cleanup cancelled.', 'info');
+		return;
+	}
+	const result = cleaned.value;
+	if (result.failed.length > 0 || result.retained.length > 0) {
+		ctx.ui.notify(
+			'Some remote residue was retained. Run dashboard cleanup again after resolving access.',
+			'warning',
+		);
+		return;
+	}
+	ctx.ui.notify('Remote residue cleaned.', 'info');
 }
 
 async function runDashboard(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
@@ -460,11 +668,16 @@ async function runDashboard(ctx: ExtensionCommandContext, agentRoot: string): Pr
 		await runSettings(ctx, agentRoot);
 		return;
 	}
-	const options = SUBCOMMANDS.filter(
-		(command) => command !== 'push' || !config.connection.readOnly,
-	);
+	const options = [
+		...SUBCOMMANDS.filter((command) => command !== 'push' || !config.connection.readOnly),
+		...(!config.connection.readOnly ? [CLEANUP_OPTION] : []),
+	];
 	const choice = await ctx.ui.select('WebDAV sync', [...options, 'cancel']);
 	if (choice === undefined || choice === 'cancel') {
+		return;
+	}
+	if (choice === CLEANUP_OPTION) {
+		await runCleanup(ctx, agentRoot);
 		return;
 	}
 	await runCommand(choice as SyncWebdavSubcommand, ctx, agentRoot);

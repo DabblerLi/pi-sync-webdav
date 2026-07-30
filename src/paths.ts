@@ -13,6 +13,9 @@ export const PRIVATE_DIRECTORY_NAME = 'pi-sync-webdav';
 export const CONFIG_FILE_NAME = 'config.json';
 
 const DRIVE_PREFIX_PATTERN = /^[a-zA-Z]:/u;
+const WINDOWS_FORBIDDEN_PATH_CHARACTER_PATTERN = /[<>:"|?*]/u;
+const WINDOWS_RESERVED_DEVICE_NAME_PATTERN =
+	/^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
 const PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES = new Set(['npm', 'git', PRIVATE_DIRECTORY_NAME]);
 const RECURSIVELY_EXCLUDED_NAMES = new Set(['logs', 'node_modules']);
 
@@ -59,6 +62,20 @@ function hasControlCharacters(value: string): boolean {
 		}
 	}
 	return false;
+}
+
+function assertWindowsSafeLocalPath(path: string, errorMessage: string): void {
+	for (const segment of path.split('/')) {
+		const trimmedSegment = segment.replace(/[ .]+$/u, '');
+		if (
+			trimmedSegment.length === 0 ||
+			trimmedSegment !== segment ||
+			WINDOWS_FORBIDDEN_PATH_CHARACTER_PATTERN.test(segment) ||
+			WINDOWS_RESERVED_DEVICE_NAME_PATTERN.test(trimmedSegment)
+		) {
+			throw new Error(errorMessage);
+		}
+	}
 }
 
 function parseLogicalRelativePath(
@@ -224,6 +241,7 @@ export function normalizeConnection(input: ConnectionInput): NormalizedConnectio
 
 export function parseManifestPath(value: unknown): SafeRelativePath {
 	const path = parseLogicalRelativePath(value, 'Invalid manifest path');
+	assertWindowsSafeLocalPath(path, 'Invalid manifest path');
 	if (isPermanentlyExcluded(path)) {
 		throw new Error('Invalid manifest path');
 	}
@@ -232,6 +250,7 @@ export function parseManifestPath(value: unknown): SafeRelativePath {
 
 export function parsePushInclude(value: unknown): SafeRelativePath {
 	const path = parseLogicalRelativePath(value, 'Invalid push include');
+	assertWindowsSafeLocalPath(path, 'Invalid push include');
 	if (path.includes('/') || isPermanentlyExcluded(path)) {
 		throw new Error('Invalid push include');
 	}
@@ -239,7 +258,7 @@ export function parsePushInclude(value: unknown): SafeRelativePath {
 }
 
 export function isPermanentlyExcluded(path: string): boolean {
-	const components = path.split('/');
+	const components = path.split('/').map((component) => component.toLocaleLowerCase('en-US'));
 	return (
 		PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES.has(components[0] ?? '') ||
 		components.some((component) => RECURSIVELY_EXCLUDED_NAMES.has(component))
