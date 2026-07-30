@@ -1,12 +1,28 @@
-# AGENTS.md
+# Project guide
 
-Read `docs/design.md` before changing code.
+Read `docs/design.md` before changing implementation code. Treat the following as the current design, and revisit them when a task explicitly changes the product scope.
 
-- Keep one manual Basic Auth WebDAV connection. Do not add auto-sync, multiple targets, ETag/LOCK, remote history, object storage, or compatibility/migration code.
-- Preserve the `manifest.json` → complete immutable revision transaction. Never overwrite the active revision in place.
-- Keep local-only backups, safe pull deletion via matching `syncState`, path validation, symlink protection, and secret redaction.
-- Use Pi's exported `SettingsManager` and `DefaultPackageManager` for `settings.packages`; do not sync `npm/` or `git/`.
-- Before staging, ensure private configuration, backups, workspaces, generated agent artifacts, and local planning notes are not staged or published.
-- Add focused Vitest coverage for behavior and failure paths. Run relevant tests, lint, typecheck, and formatting before reporting completion.
-- Keep public documentation in English; `README.zh-CN.md` is the Chinese README translation.
-- Do not commit, publish, change versions, or modify release settings without explicit user approval.
+## Current design
+
+- The package currently supports one manually initiated Basic Auth WebDAV target.
+- Pushes publish a complete new revision and activate it through `manifest.json`.
+- Local backups, safe pull deletion based on matching `syncState`, path validation, and symlink protection are part of the current safety model.
+- `npm/`, `git/`, and `pi-sync-webdav/` are excluded from synchronization under the current design.
+
+## Implementation expectations
+
+- Keep credentials and secret matches out of UI, errors, logs, manifests, and pending package operations. Reject credential-bearing package sources before display or persistence.
+- Keep `status` and `diff` read-only. Pull cancellation should clean its private workspace.
+- Reconcile `settings.packages` through Pi's exported `SettingsManager` and `DefaultPackageManager`.
+- Add focused Vitest coverage for behavior, failures, and cancellation paths.
+
+## Public delivery
+
+- Write public documentation for readers: avoid future plans, process narration, unnecessary implementation detail, and backward-compatibility discussion.
+- `README.md` is English and `README.zh-CN.md` is its Chinese translation; both link to the other language at the top.
+- The current delivery uses tag-triggered npm publishing through `.github/workflows/publish.yml` and does not include GitHub Releases, Changesets, or a changelog.
+
+## Validation and Git
+
+- Before reporting completion, run formatting, lint, typecheck, tests, package validation, and `git diff --check`.
+- Do not commit, publish, change versions, push tags, or alter release settings without explicit user approval. Review the diff before staging.
