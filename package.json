@@ -1,0 +1,63 @@
+{
+	"name": "pi-sync-webdav",
+	"version": "0.0.0",
+	"description": "Manual WebDAV sync for Pi Coding Agent configuration.",
+	"license": "MIT",
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/DabblerLi/pi-sync-webdav.git"
+	},
+	"bugs": {
+		"url": "https://github.com/DabblerLi/pi-sync-webdav/issues"
+	},
+	"homepage": "https://github.com/DabblerLi/pi-sync-webdav#readme",
+	"keywords": [
+		"pi",
+		"pi-package",
+		"pi-extension",
+		"webdav",
+		"configuration",
+		"sync"
+	],
+	"files": [
+		"src",
+		"README.md",
+		"README.zh-CN.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"scripts": {
+		"format": "prettier --write AGENTS.md docs/design.md src test package.json tsconfig.json eslint.config.mjs vitest.config.ts .prettierrc.json",
+		"format:check": "prettier --check AGENTS.md docs/design.md src test package.json tsconfig.json eslint.config.mjs vitest.config.ts .prettierrc.json",
+		"lint": "eslint .",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"pack:check": "npm pack --dry-run"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
+	},
+	"dependencies": {
+		"webdav": "^5.10.0"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.83.0",
+		"@eslint/js": "^9.39.5",
+		"@types/node": "^22.20.0",
+		"eslint": "^9.39.5",
+		"eslint-config-prettier": "^10.1.8",
+		"prettier": "^3.9.6",
+		"typescript": "^5.9.3",
+		"typescript-eslint": "^8.65.0",
+		"vitest": "^4.1.10"
+	}
+}

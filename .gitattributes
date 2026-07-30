@@ -1,0 +1,7 @@
+# Normalize text files across development platforms.
+* text=auto eol=lf
+
+# Improve diffs for the primary project formats.
+*.ts diff=typescript
+*.json diff=json
+*.md diff=markdown

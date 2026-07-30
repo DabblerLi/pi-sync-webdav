@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build, test, and package artifacts
+dist/
+coverage/
+reports/
+*.tsbuildinfo
+*.tgz
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.pi/
+.pi-subagents/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
