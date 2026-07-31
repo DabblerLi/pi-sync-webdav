@@ -17,11 +17,12 @@
 	"homepage": "https://github.com/DabblerLi/pi-sync-webdav#readme",
 	"keywords": [
 		"pi",
-		"pi-coding-agent",
 		"pi-package",
 		"pi-extension",
 		"webdav",
-		"configuration",
+		"webdav-sync",
+		"config",
+		"settings",
 		"sync"
 	],
 	"files": [
