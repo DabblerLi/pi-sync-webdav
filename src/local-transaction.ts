@@ -338,6 +338,14 @@ async function writePersistentBackup(agentRoot: string, snapshot: ActiveSnapshot
 	verifyContents(snapshot, backupContents);
 }
 
+async function clearPersistentBackups(agentRoot: string): Promise<void> {
+	const paths = await getPrivateDirectory(agentRoot);
+	await ensureSafeDirectory(paths.backupsDirectory, 0o700, 'Unsafe backup directory');
+	for (const entry of await fs.readdir(paths.backupsDirectory)) {
+		await fs.rm(join(paths.backupsDirectory, entry), { force: true, recursive: true });
+	}
+}
+
 async function readStagedFile(
 	agentRoot: string,
 	workspace: PullWorkspace,
@@ -507,6 +515,12 @@ async function rollbackMutations(
 export async function createPullWorkspace(agentRoot: string): Promise<PullWorkspace> {
 	const paths = await getPrivateDirectory(agentRoot);
 	await ensureSafeDirectory(paths.workspaceDirectory, 0o700, 'Unsafe pull workspace directory');
+	// Remove workspaces left behind by interrupted pulls; unrecognized entries are kept.
+	for (const entry of await fs.readdir(paths.workspaceDirectory, { withFileTypes: true })) {
+		if (entry.isDirectory() && WORKSPACE_ID_PATTERN.test(entry.name)) {
+			await fs.rm(join(paths.workspaceDirectory, entry.name), { force: true, recursive: true });
+		}
+	}
 	const id = randomUUID();
 	const directory = join(paths.workspaceDirectory, id);
 	await fs.mkdir(directory, { mode: 0o700 });
@@ -565,6 +579,16 @@ export async function applyPullPlan(
 	throwIfOperationCancelled(operation?.signal);
 	await verifyWorkspaceFiles(agentRoot, workspace, plan.downloads, operation);
 	const mutations: AppliedMutation[] = [];
+	// Backups capture the files replaced or removed by this pull. The first
+	// backup write replaces the set left by the previous pull.
+	let backupsCleared = false;
+	const backupPrevious = async (previous: ActiveSnapshot): Promise<void> => {
+		if (!backupsCleared) {
+			backupsCleared = true;
+			await clearPersistentBackups(agentRoot);
+		}
+		await writePersistentBackup(agentRoot, previous);
+	};
 	try {
 		if (new Set(plan.actions.map((mutation) => mutation.path)).size !== plan.actions.length) {
 			throw new Error('Duplicate pull mutation path');
@@ -592,7 +616,7 @@ export async function applyPullPlan(
 				if (previous === undefined) {
 					throw new Error('Local target changed');
 				}
-				await writePersistentBackup(agentRoot, previous);
+				await backupPrevious(previous);
 				throwIfOperationCancelled(operation?.signal);
 				await readActiveSnapshot(agentRoot, mutation.path, mutation.expectedLocal);
 				throwIfOperationCancelled(operation?.signal);
@@ -606,7 +630,7 @@ export async function applyPullPlan(
 			const contents = await readStagedFile(agentRoot, workspace, mutation.source);
 			throwIfOperationCancelled(operation?.signal);
 			if (previous !== undefined) {
-				await writePersistentBackup(agentRoot, previous);
+				await backupPrevious(previous);
 				throwIfOperationCancelled(operation?.signal);
 			}
 			await readActiveSnapshot(agentRoot, mutation.path, mutation.expectedLocal);
@@ -645,13 +669,14 @@ export async function disposePullWorkspace(
 		if (!entry.isDirectory() || entry.isSymbolicLink()) {
 			throw new Error('Unsafe pull workspace');
 		}
+		await fs.rm(workspaceDirectory, { force: true, recursive: true });
 	} catch (error: unknown) {
-		if (isMissingPath(error)) {
-			return;
+		if (!isMissingPath(error)) {
+			throw error;
 		}
-		throw error;
 	}
-	await fs.rm(workspaceDirectory, { force: true, recursive: true });
+	// Remove the workspace parent when no staged workspaces remain.
+	await fs.rmdir(paths.workspaceDirectory).catch(() => undefined);
 }
 
 export async function listBackups(

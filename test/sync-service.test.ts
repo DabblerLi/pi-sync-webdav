@@ -1,4 +1,4 @@
-import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 
 import { SettingsManager } from '@earendil-works/pi-coding-agent';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -170,7 +170,9 @@ describe('sync service', () => {
 		await expect(stagePreparedPull(root, preparation, controller.signal)).rejects.toThrow(
 			'Pull download cancelled',
 		);
-		await expect(readdir(getPrivatePaths(root).workspaceDirectory)).resolves.toEqual([]);
+		await expect(stat(getPrivatePaths(root).workspaceDirectory)).rejects.toMatchObject({
+			code: 'ENOENT',
+		});
 	});
 
 	it('rejects credential-bearing hosted package sources before pull confirmation or local writes', async () => {

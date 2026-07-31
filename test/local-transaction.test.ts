@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmod, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -167,6 +167,150 @@ describe('pull transaction', () => {
 			'old settings',
 		);
 		await disposePullWorkspace(root, workspace);
+	});
+
+	it('removes stale workspaces from interrupted pulls when creating a new one', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		const stale = await createPullWorkspace(root);
+		const parent = join(root, 'pi-sync-webdav', 'workspace');
+		await writeFile(join(parent, stale.id, 'partial.json'), '{}', 'utf8');
+		const unrecognized = join(parent, 'keep-me');
+		await mkdir(unrecognized);
+
+		const workspace = await createPullWorkspace(root);
+
+		await expect(stat(join(parent, stale.id))).rejects.toMatchObject({ code: 'ENOENT' });
+		expect((await stat(unrecognized)).isDirectory()).toBe(true);
+		expect((await stat(join(parent, workspace.id))).isDirectory()).toBe(true);
+		await disposePullWorkspace(root, workspace);
+	});
+
+	it('removes the empty workspace parent directory after disposal', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		const workspace = await createPullWorkspace(root);
+		const parent = join(root, 'pi-sync-webdav', 'workspace');
+
+		await disposePullWorkspace(root, workspace);
+
+		await expect(stat(parent)).rejects.toMatchObject({ code: 'ENOENT' });
+	});
+
+	it('keeps the workspace parent directory while another workspace is staged', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		const first = await createPullWorkspace(root);
+		const second = await createPullWorkspace(root);
+		const parent = join(root, 'pi-sync-webdav', 'workspace');
+
+		await disposePullWorkspace(root, first);
+
+		expect((await stat(parent)).isDirectory()).toBe(true);
+		await disposePullWorkspace(root, second);
+		await expect(stat(parent)).rejects.toMatchObject({ code: 'ENOENT' });
+	});
+
+	it('replaces the previous backup set when a later pull writes new backups', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		const backupsDirectory = join(root, 'pi-sync-webdav', 'backups');
+		await writeFile(join(root, 'test.json'), 'old test', 'utf8');
+		const firstManifest = createManifest([{ contents: 'new test', path: 'test.json' }]);
+		const firstWorkspace = await stageManifest(
+			root,
+			firstManifest,
+			new Map([['test.json', 'new test']]),
+		);
+		await applyPullPlan(root, firstWorkspace, {
+			actions: [
+				{
+					action: 'update',
+					expectedLocal: expected('old test'),
+					path: parseManifestPath('test.json'),
+					source: source(firstManifest, 'test.json'),
+				},
+			],
+			downloads: firstManifest.files,
+			nextManagedPaths: firstManifest.files.map((file) => file.path),
+		});
+		await disposePullWorkspace(root, firstWorkspace);
+		expect(await readFile(join(backupsDirectory, 'test.json'), 'utf8')).toBe('old test');
+
+		await rm(join(root, 'test.json'));
+		await writeFile(join(root, 'test2.json'), 'old test2', 'utf8');
+		const secondManifest = createManifest([{ contents: 'new test2', path: 'test2.json' }]);
+		const secondWorkspace = await stageManifest(
+			root,
+			secondManifest,
+			new Map([['test2.json', 'new test2']]),
+		);
+		await applyPullPlan(root, secondWorkspace, {
+			actions: [
+				{
+					action: 'update',
+					expectedLocal: expected('old test2'),
+					path: parseManifestPath('test2.json'),
+					source: source(secondManifest, 'test2.json'),
+				},
+			],
+			downloads: secondManifest.files,
+			nextManagedPaths: secondManifest.files.map((file) => file.path),
+		});
+		await disposePullWorkspace(root, secondWorkspace);
+
+		expect(await readFile(join(backupsDirectory, 'test2.json'), 'utf8')).toBe('old test2');
+		await expect(stat(join(backupsDirectory, 'test.json'))).rejects.toMatchObject({
+			code: 'ENOENT',
+		});
+	});
+
+	it('keeps the previous backup set when a pull adds only new files', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		const backupsDirectory = join(root, 'pi-sync-webdav', 'backups');
+		await writeFile(join(root, 'test.json'), 'old test', 'utf8');
+		const firstManifest = createManifest([{ contents: 'new test', path: 'test.json' }]);
+		const firstWorkspace = await stageManifest(
+			root,
+			firstManifest,
+			new Map([['test.json', 'new test']]),
+		);
+		await applyPullPlan(root, firstWorkspace, {
+			actions: [
+				{
+					action: 'update',
+					expectedLocal: expected('old test'),
+					path: parseManifestPath('test.json'),
+					source: source(firstManifest, 'test.json'),
+				},
+			],
+			downloads: firstManifest.files,
+			nextManagedPaths: firstManifest.files.map((file) => file.path),
+		});
+		await disposePullWorkspace(root, firstWorkspace);
+
+		const secondManifest = createManifest([{ contents: 'brand new', path: 'added.json' }]);
+		const secondWorkspace = await stageManifest(
+			root,
+			secondManifest,
+			new Map([['added.json', 'brand new']]),
+		);
+		await applyPullPlan(root, secondWorkspace, {
+			actions: [
+				{
+					action: 'add',
+					expectedLocal: { kind: 'absent' },
+					path: parseManifestPath('added.json'),
+					source: source(secondManifest, 'added.json'),
+				},
+			],
+			downloads: secondManifest.files,
+			nextManagedPaths: secondManifest.files.map((file) => file.path),
+		});
+		await disposePullWorkspace(root, secondWorkspace);
+
+		expect(await readFile(join(backupsDirectory, 'test.json'), 'utf8')).toBe('old test');
 	});
 
 	it('repairs auth.json permissions without rewriting matching contents or creating a backup', async () => {
