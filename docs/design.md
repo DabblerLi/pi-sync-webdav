@@ -5,7 +5,7 @@
 `pi-sync-webdav` is a Pi Package for manual configuration sync over one Basic Auth WebDAV connection.
 
 - Commands: `/sync-webdav`, `settings`, `status`, `diff`, `push`, `pull`, and `restore`.
-- `/sync-webdav` initializes an unconfigured package; otherwise its dashboard offers the commands and manual remote-residue cleanup. `settings` edits either the complete connection or the local push selection. Saving a connection validates independent read access and write capability but does not start a push or pull.
+- `/sync-webdav` initializes an unconfigured package; otherwise its dashboard offers the commands and manual remote-residue cleanup. `settings` edits either the complete connection or the local push selection. Saving a connection validates read and write access but does not start a push or pull.
 - Sync is always user initiated. There is no background sync, file watching, multi-target support, ETag/LOCK handling, remote history, or backward compatibility.
 - The plugin supports standard WebDAV operations only: `MKCOL`, `PROPFIND`, `GET`, `PUT`, and `DELETE`.
 
@@ -14,8 +14,8 @@
 Private data lives under the effective Pi agent directory in `pi-sync-webdav/` and is never synced.
 
 - Configuration and credentials use mode `0600` where supported. A pull repairs `auth.json` to mode `0600` where supported even when its contents are unchanged.
-- `backups/` contains the latest local backup per affected file.
-- A local temporary workspace is used for downloads before local replacement.
+- `backups/` holds the files replaced or removed by the most recent pull that changed local files; the first backup write of a later pull replaces the previous set.
+- A local temporary workspace stages downloads for verification before local replacement. It is removed when the pull finishes, and stale workspaces from interrupted pulls are removed when the next pull starts.
 - The configuration stores one connection, the push include list, and minimal sync state.
 - Sync state contains only a connection fingerprint and managed relative paths. It is used to safely mirror remote deletions only for files previously managed by the same connection.
 - Saving a connection with a changed URL, remote path, or username drops sync state; changing only the password retains it.
@@ -52,17 +52,16 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 
 ## Safety rules
 
-- Validate URLs, remote paths, manifest entries, and local targets before I/O. A remote path may have one input trailing slash but is persisted without it. Reject unsafe paths, special files, Windows absolute/drive paths, device names, alternate data streams, trailing dots or spaces, symlink traversal, and case-folding destination collisions.
+- Validate URLs, remote paths, manifest entries, and local targets before I/O. A remote path may have one input trailing slash but is persisted without it. Reject unsafe paths: traversal, special files, absolute/Windows paths, device names, alternate data streams, trailing dots/spaces, symlinks, and case-insensitive collisions.
 - `npm/`, `git/`, and the plugin private directory are never synced. `logs/` and `node_modules/` are also excluded at every depth.
-- `sessions/` and `auth.json` are opt-in with extra confirmation. `auth.json` is restored with mode `0600`.
+- `sessions/` and `auth.json` are opt-in. The extra confirmation appears only when such a path is added to the push selection for the first time; once saved, later edits and sync operations do not ask again. `auth.json` is restored with mode `0600`.
 - Selected text files receive local secret-pattern warnings. Secrets, credentials, file contents, and Authorization headers are never rendered or logged.
 - HTTPS is required by default; HTTP requires explicit confirmation. Invalid or self-signed TLS certificates are rejected. A connection must prove read access before it can be saved; a failed write probe produces an explicitly read-only connection.
 - Limits: 50 MiB per file and 500 MiB per operation.
 
 ## Verification
 
-- Unit and integration tests use Vitest.
-- The integration fixture is a local `node:http` WebDAV server; Docker and vendor-specific CI are intentionally excluded.
-- Ubuntu runs the complete Node 22/24 matrix. Windows and macOS run type, unit, and sensitive-permission checks.
-- The public README is English with a Chinese translation. Development documentation and contributor guidance are English.
-- Tag-triggered npm publishing uses GitHub OIDC and explicit npm provenance.
+- Unit and integration tests use Vitest. The fixture is an in-process `node:http` Basic Auth WebDAV server; Docker and vendor-specific CI are intentionally excluded.
+- CI runs the full check matrix on Ubuntu (Node 22 and 24) and type/unit checks on macOS and Windows; see [.github/workflows/ci.yml](.github/workflows/ci.yml).
+- Releases are tag-triggered npm publishing with GitHub OIDC and explicit npm provenance; see [.github/workflows/publish.yml](.github/workflows/publish.yml).
+- The public README is English with a Chinese translation; contributor and design documentation is English.

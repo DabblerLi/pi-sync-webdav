@@ -2,13 +2,15 @@
 
 [简体中文](README.zh-CN.md)
 
-Manual, single-target synchronization for one Pi Coding Agent configuration directory through a Basic Auth WebDAV server.
+A Pi Coding Agent extension that syncs one configuration directory to and from a WebDAV server using Basic Auth.
+
+Sync is manual and one direction at a time: you run `push` or `pull` yourself. There is no background sync, no multi-target routing, and no remote history to restore from.
 
 ## Requirements
 
 - Pi Coding Agent
-- A WebDAV endpoint that supports Basic Auth
-- HTTPS, unless you explicitly accept the HTTP warning during configuration
+- A WebDAV server that supports Basic Auth
+- HTTPS (HTTP is allowed only after you accept the cleartext warning during setup)
 
 ## Install
 
@@ -16,57 +18,66 @@ Manual, single-target synchronization for one Pi Coding Agent configuration dire
 pi install npm:pi-sync-webdav
 ```
 
-To update:
+Update with:
 
 ```bash
 pi update --extensions
 ```
 
+## Quick start
+
+1. Create an empty, dedicated WebDAV folder for pi-sync-webdav. Do not put other files in it; the extension manages its own sync data there.
+2. Run `/sync-webdav` and enter the WebDAV URL, the folder path, your username, and password. Setup will test read and write access to this folder before saving.
+3. Choose which local paths to push.
+4. Run `push` on the machine you want to sync from and `pull` on the machine you want to sync to. Each changing action asks for confirmation first.
+
 ## Commands
 
-| Command                 | Purpose                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `/sync-webdav`          | Starts initial configuration when unconfigured, otherwise opens the dashboard. |
-| `/sync-webdav settings` | Edits the WebDAV connection or push selection.                                 |
-| `/sync-webdav status`   | Checks remote readability without changing configuration.                      |
-| `/sync-webdav diff`     | Shows planned push changes.                                                    |
-| `/sync-webdav push`     | Uploads the selected local configuration.                                      |
-| `/sync-webdav pull`     | Downloads and applies remote configuration after confirmation.                 |
-| `/sync-webdav restore`  | Restores the latest local backups created by a prior pull.                     |
+| Command                 | What it does                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------- |
+| `/sync-webdav`          | Opens setup when unconfigured, otherwise the dashboard.                         |
+| `/sync-webdav settings` | Edits the WebDAV connection or the local push selection.                        |
+| `/sync-webdav status`   | Checks that the remote folder is reachable and readable, and reports sync data. |
+| `/sync-webdav diff`     | Previews the file changes the next push would make. Changes nothing.            |
+| `/sync-webdav push`     | Uploads the selected local configuration.                                       |
+| `/sync-webdav pull`     | Downloads and applies the remote configuration after confirmation.              |
+| `/sync-webdav restore`  | Reapplies the most recent local backups created by a prior pull.                |
 
-`settings`, `push`, `pull`, and `restore` require an interactive Pi TUI. `status` and `diff` can run non-interactively.
-
-## Configuration
-
-Run `/sync-webdav` and follow the prompts to configure WebDAV and select the local paths to push. Use a dedicated remote path for this package.
-
-After configuration, select **settings** in the dashboard or run `/sync-webdav settings`:
-
-- **Connection** updates the URL, remote path, username, and password. The complete connection is checked for read access and write capability before it is saved. A readable but non-writable target is saved as read-only.
-- **Push selection** updates only the local selection, does not contact WebDAV, and requires a final review before saving.
-
-Changing a connection does not push or pull automatically. Choose `push` or `pull` yourself.
+`status` and `diff` are read-only and can run non-interactively. `settings`, `push`, `pull`, and `restore` require an interactive Pi TUI.
 
 ## What syncs
 
-The default push selection is `settings.json`, `keybindings.json`, `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `models.json`, `themes/`, `prompts/`, `skills/`, and `extensions/`.
+Default push selection: `settings.json`, `keybindings.json`, `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `models.json`, `themes/`, `prompts/`, `skills/`, `extensions/`.
 
-You can change the selection in **settings**. Directories are recursive. `sessions/` and `auth.json` are opt-in and require an additional confirmation. `logs/` and `node_modules/` are excluded at every depth. The selection affects push only; pull applies the remote configuration.
+Change the selection under **settings**. Directories sync recursively. The selection only affects `push`; `pull` always applies the full remote file set.
 
-## Sync behavior
+Never synced: `npm/`, `git/`, `pi-sync-webdav/`, `logs/`, `node_modules/`.
 
-When changes are found, push and pull show a plan and require confirmation. Pull validates the complete download before changing local files and creates local backups for files it replaces or removes.
+`sessions/` and `auth.json` are off by default. Adding one to the selection asks for an extra confirmation the first time; after that it stays approved. Treat everything you select—especially `auth.json`—as sensitive and only sync to a remote you trust.
 
-Long-running interactive actions show progress. Press Esc to request cancellation.
+## How sync works
 
-The dashboard provides **Clean remote residue** for writable connections. It only removes recognized stale sync data; unrecognized remote items are retained.
+- **push** publishes your currently selected local files to the dedicated remote folder.
+- **pull** applies the remote file set, even if your local push selection is different. Review the planned additions, updates, and removals before confirming.
+- Before pull replaces or removes a managed local file, it keeps a local backup of that file.
+- **restore** reapplies those local file backups after confirmation. It does not restore a remote version and does not reinstall Pi packages.
+- Backups live in `pi-sync-webdav/backups/` inside the Pi agent directory and mirror each file's original relative path. They hold the files replaced or removed by the most recent pull: the next pull that changes local files replaces the whole set, and restore leaves backups in place. To clear backups, delete that folder or single files inside it.
+- This is not a remote backup-history service: there is no remote restore command.
 
-Package declarations in `settings.json` are applied after files. If a package operation fails or cancellation interrupts that step, the pulled files remain and Pi asks you to resolve the package manually.
+## Remote access and safety
 
-There is no remote history or remote restore operation.
+- HTTPS is required by default. HTTP needs an explicit warning confirmation. Self-signed or invalid TLS certificates are rejected.
+- If the remote folder can be read but not written, the connection is saved as read-only. You can still use `status`, `diff`, and `pull`; `push` and residue cleanup are unavailable.
+- Saving a connection only tests access—it never starts a push or pull.
+- Long-running actions show progress and can be cancelled with Esc.
+- For writable connections, the dashboard offers **Clean remote residue** to remove old sync data left by failed or cancelled attempts.
+
+## Pi packages
+
+`settings.json` can declare Pi packages (the extensions you install with `pi install`). During pull, those declarations are turned into install, update, or remove operations and shown for confirmation alongside file changes. Package install code runs with your user permissions, so pull only from a remote you trust.
+
+If a package operation fails or is cancelled after files were pulled, the pulled files stay and you must resolve the package change manually.
 
 ## License
 
-[MIT](LICENSE)
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
+[MIT](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
