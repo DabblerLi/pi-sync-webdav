@@ -1,6 +1,8 @@
 import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { Key, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
 
+import { createDialogContainer, formatKeyHints } from './ui.js';
+
 function printableText(value: string): string {
 	return [...value]
 		.filter((character) => {
@@ -17,7 +19,7 @@ export async function promptSecret(
 	if (ctx.mode !== 'tui') {
 		return undefined;
 	}
-	return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
 		let characters: string[] = [];
 		let complete = false;
 
@@ -30,6 +32,25 @@ export async function promptSecret(
 			characters = [];
 			done(result);
 		};
+
+		const body = {
+			invalidate: () => undefined,
+			render: (width: number): string[] => {
+				// Mirrors pi's Input: "> " prompt with an inverse-video cursor.
+				const masked = '*'.repeat(characters.length);
+				return [truncateToWidth(` > ${masked}\x1b[7m \x1b[27m`, width)];
+			},
+		};
+		const container = createDialogContainer({
+			body,
+			boldTitle: false,
+			hints: formatKeyHints(theme, [
+				[keybindings.getKeys('tui.select.confirm').join('/'), 'submit'],
+				[keybindings.getKeys('tui.select.cancel').join('/'), 'cancel'],
+			]),
+			theme,
+			title,
+		});
 
 		return {
 			handleInput: (data: string) => {
@@ -55,13 +76,8 @@ export async function promptSecret(
 					tui.requestRender();
 				}
 			},
-			invalidate: () => undefined,
-			render: (width: number) => {
-				const message = `${title}\n${'*'.repeat(characters.length)}\nEnter to continue • Esc to cancel`;
-				return message
-					.split('\n')
-					.map((line) => truncateToWidth(theme.fg('text', line), Math.max(1, width)));
-			},
+			invalidate: () => container.invalidate(),
+			render: (width: number) => container.render(width),
 			dispose: () => {
 				characters.fill('');
 				characters = [];

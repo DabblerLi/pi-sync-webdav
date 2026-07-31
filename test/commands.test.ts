@@ -1,4 +1,5 @@
-import type { ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
+import type { ExtensionAPI, ExtensionCommandContext, Theme } from '@earendil-works/pi-coding-agent';
+import { getKeybindings, type KeybindingsManager } from '@earendil-works/pi-tui';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { MockWebDavServer } from './mock-webdav-server.js';
@@ -19,52 +20,71 @@ import { createTemporaryDirectory, removeTemporaryDirectory } from './helpers.js
 const temporaryDirectories: string[] = [];
 const servers: MockWebDavServer[] = [];
 
-interface CancellableTestComponent {
-	abortController?: AbortController;
+const themeStub = {
+	bold: (value: string) => value,
+	fg: (_color: string, value: string) => value,
+} as unknown as Theme;
+
+interface DrivenComponent {
 	dispose?(): void;
-	onAbort?(): void;
+	handleInput?(data: string): void;
+	render(width: number): string[];
 }
 
-type CancellableTestFactory<T> = (
+type CustomStep =
+	| { readonly type: 'cancel' }
+	| { readonly type: 'complete' }
+	| {
+			readonly type: 'inspect';
+			readonly onRender: (lines: string[]) => void;
+			readonly value: unknown;
+	  }
+	| { readonly type: 'value'; readonly value: unknown };
+
+type CustomFactory = (
 	tui: { readonly requestRender: () => void },
-	theme: { readonly fg: (color: string, value: string) => string },
-	keybindings: unknown,
-	done: (value: T) => void,
-) => CancellableTestComponent;
+	theme: Theme,
+	keybindings: KeybindingsManager,
+	done: (value: never) => void,
+) => DrivenComponent;
 
-function completeCancellableCustom<T>(factory: CancellableTestFactory<T>): Promise<T> {
-	return new Promise<T>((resolve) => {
-		const state: { component: CancellableTestComponent | undefined } = { component: undefined };
-		state.component = factory(
-			{ requestRender: vi.fn() },
-			{ fg: (_color: string, value: string) => value },
-			{},
-			(value: T) => {
-				state.component?.dispose?.();
-				resolve(value);
-			},
-		);
-	});
+function valueStep(value: unknown): CustomStep {
+	return { type: 'value', value };
 }
 
-function cancelCancellableCustom<T>(factory: CancellableTestFactory<T>): Promise<T> {
-	return new Promise<T>((resolve) => {
-		const state: { component: CancellableTestComponent | undefined } = { component: undefined };
-		state.component = factory(
-			{ requestRender: vi.fn() },
-			{ fg: (_color: string, value: string) => value },
-			{},
-			(value: T) => {
-				state.component?.dispose?.();
-				resolve(value);
-			},
-		);
-		if (state.component.abortController === undefined) {
-			throw new Error('Expected a cancellable loader');
+function createCustomDriver(steps: readonly CustomStep[]) {
+	let position = 0;
+	const custom = vi.fn((factory: CustomFactory) => {
+		const step = steps[position];
+		position += 1;
+		if (step === undefined) {
+			throw new Error(`Unexpected custom dialog at position ${position}`);
 		}
-		state.component.abortController.abort();
-		state.component.onAbort?.();
+		if (step.type === 'value') {
+			return Promise.resolve(step.value);
+		}
+		return new Promise((resolve) => {
+			const component = factory(
+				{ requestRender: vi.fn() },
+				themeStub,
+				getKeybindings(),
+				(value: never) => {
+					component.dispose?.();
+					resolve(value);
+				},
+			);
+			if (step.type === 'inspect') {
+				step.onRender(component.render(80));
+				component.dispose?.();
+				resolve(step.value);
+				return;
+			}
+			if (step.type === 'cancel') {
+				component.handleInput?.('\x1b');
+			}
+		});
 	});
+	return { calls: () => position, custom };
 }
 
 afterEach(async () => {
@@ -136,29 +156,28 @@ describe('sync command registration', () => {
 			),
 		} as unknown as ExtensionAPI;
 		registerSyncWebdavCommands(pi, () => root);
-		const select = vi.fn();
+		const driver = createCustomDriver([
+			valueStep('password'),
+			valueStep(true),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('settings.json')]),
+			{ type: 'complete' },
+		]);
 
 		await registered?.handler('', {
 			mode: 'tui',
 			ui: {
-				confirm: vi.fn().mockResolvedValue(true),
-				custom: vi
-					.fn()
-					.mockResolvedValueOnce('password')
-					.mockImplementationOnce(completeCancellableCustom)
-					.mockResolvedValueOnce([parsePushInclude('settings.json')])
-					.mockImplementationOnce(completeCancellableCustom),
+				custom: driver.custom,
 				input: vi
 					.fn()
 					.mockResolvedValueOnce(server.baseUrl)
 					.mockResolvedValueOnce('pi-sync-webdav')
 					.mockResolvedValueOnce('alice'),
 				notify: vi.fn(),
-				select,
 			},
 		} as unknown as ExtensionCommandContext);
 
-		expect(select).not.toHaveBeenCalled();
+		expect(driver.calls()).toBe(5);
 		expect(await readConfig(root)).toMatchObject({
 			connection: { password: 'password', username: 'alice' },
 			pushInclude: [parsePushInclude('settings.json')],
@@ -183,24 +202,24 @@ describe('sync command registration', () => {
 			() => root,
 		);
 		const notify = vi.fn();
+		const driver = createCustomDriver([
+			valueStep('password'),
+			valueStep(true),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('settings.json')]),
+			{ type: 'cancel' },
+		]);
 
 		await registered?.handler('', {
 			mode: 'tui',
 			ui: {
-				confirm: vi.fn().mockResolvedValue(true),
-				custom: vi
-					.fn()
-					.mockResolvedValueOnce('password')
-					.mockImplementationOnce(completeCancellableCustom)
-					.mockResolvedValueOnce([parsePushInclude('settings.json')])
-					.mockImplementationOnce(cancelCancellableCustom),
+				custom: driver.custom,
 				input: vi
 					.fn()
 					.mockResolvedValueOnce(server.baseUrl)
 					.mockResolvedValueOnce('pi-sync-webdav')
 					.mockResolvedValueOnce('alice'),
 				notify,
-				select: vi.fn(),
 			},
 		} as unknown as ExtensionCommandContext);
 
@@ -234,20 +253,18 @@ describe('sync command registration', () => {
 		} as unknown as ExtensionAPI;
 		registerSyncWebdavCommands(pi, () => root);
 		const input = vi.fn();
-		const select = vi
-			.fn()
-			.mockResolvedValueOnce('settings')
-			.mockResolvedValueOnce('Push selection')
-			.mockResolvedValueOnce('Cancel');
-		const custom = vi
-			.fn()
-			.mockImplementationOnce(completeCancellableCustom)
-			.mockResolvedValue([parsePushInclude('AGENTS.md')]);
+		const driver = createCustomDriver([
+			valueStep('Settings'),
+			valueStep('Push selection'),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('AGENTS.md')]),
+			valueStep('Cancel'),
+		]);
 		const notify = vi.fn();
 
 		await registered?.handler('', {
 			mode: 'tui',
-			ui: { confirm: vi.fn().mockResolvedValue(true), custom, input, notify, select },
+			ui: { custom: driver.custom, input, notify },
 		} as unknown as ExtensionCommandContext);
 
 		expect(input).not.toHaveBeenCalled();
@@ -287,29 +304,27 @@ describe('sync command registration', () => {
 			),
 		} as unknown as ExtensionAPI;
 		registerSyncWebdavCommands(pi, () => root);
-		const select = vi
-			.fn()
-			.mockResolvedValueOnce('settings')
-			.mockResolvedValueOnce('Connection')
-			.mockResolvedValueOnce('Change password')
-			.mockResolvedValueOnce('Cancel');
 		const input = vi
 			.fn()
 			.mockResolvedValueOnce(server.baseUrl)
 			.mockResolvedValueOnce('new-root')
 			.mockResolvedValueOnce('bob');
+		const driver = createCustomDriver([
+			valueStep('Settings'),
+			valueStep('Connection'),
+			valueStep('Change password'),
+			valueStep('new-password'),
+			valueStep(true),
+			{ type: 'complete' },
+			valueStep('Cancel'),
+		]);
 
 		await registered?.handler('', {
 			mode: 'tui',
 			ui: {
-				confirm: vi.fn().mockResolvedValue(true),
-				custom: vi
-					.fn()
-					.mockResolvedValueOnce('new-password')
-					.mockImplementationOnce(completeCancellableCustom),
+				custom: driver.custom,
 				input,
 				notify: vi.fn(),
-				select,
 			},
 		} as unknown as ExtensionCommandContext);
 
@@ -360,23 +375,24 @@ describe('sync command registration', () => {
 		} as unknown as ExtensionAPI;
 		registerSyncWebdavCommands(pi, () => root);
 		const notify = vi.fn();
+		const driver = createCustomDriver([
+			valueStep('Settings'),
+			valueStep('Connection'),
+			valueStep('Keep current password'),
+			valueStep(true),
+			{ type: 'complete' },
+		]);
 
 		await registered?.handler('', {
 			mode: 'tui',
 			ui: {
-				confirm: vi.fn().mockResolvedValue(true),
-				custom: vi.fn().mockImplementationOnce(completeCancellableCustom),
+				custom: driver.custom,
 				input: vi
 					.fn()
 					.mockResolvedValueOnce(server.baseUrl)
 					.mockResolvedValueOnce('new-root')
 					.mockResolvedValueOnce('bob'),
 				notify,
-				select: vi
-					.fn()
-					.mockResolvedValueOnce('settings')
-					.mockResolvedValueOnce('Connection')
-					.mockResolvedValueOnce('Keep current password'),
 			},
 		} as unknown as ExtensionCommandContext);
 
@@ -414,28 +430,26 @@ describe('sync command registration', () => {
 			),
 		} as unknown as ExtensionAPI;
 		registerSyncWebdavCommands(pi, () => root);
-		const select = vi
-			.fn()
-			.mockResolvedValueOnce('settings')
-			.mockResolvedValueOnce('Connection')
-			.mockResolvedValueOnce('Change password')
-			.mockResolvedValueOnce('Cancel');
+		const driver = createCustomDriver([
+			valueStep('Settings'),
+			valueStep('Connection'),
+			valueStep('Change password'),
+			valueStep('new-password'),
+			valueStep(true),
+			{ type: 'complete' },
+			valueStep('Cancel'),
+		]);
 
 		await registered?.handler('', {
 			mode: 'tui',
 			ui: {
-				confirm: vi.fn().mockResolvedValue(true),
-				custom: vi
-					.fn()
-					.mockResolvedValueOnce('new-password')
-					.mockImplementationOnce(completeCancellableCustom),
+				custom: driver.custom,
 				input: vi
 					.fn()
 					.mockResolvedValueOnce(server.baseUrl)
 					.mockResolvedValueOnce('sync-root')
 					.mockResolvedValueOnce('alice'),
 				notify: vi.fn(),
-				select,
 			},
 		} as unknown as ExtensionCommandContext);
 
@@ -466,7 +480,7 @@ describe('sync command registration', () => {
 		await store.publishRevision({
 			allowUnverifiedManifest: false,
 			expectedManifestSha256: undefined,
-			files: [],
+			files: [{ contents: Buffer.from('{}', 'utf8'), path: parseManifestPath('settings.json') }],
 		});
 		server.requests.splice(0);
 		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
@@ -488,7 +502,7 @@ describe('sync command registration', () => {
 		} as unknown as ExtensionCommandContext);
 
 		expect(notify).toHaveBeenCalledWith(
-			'Remote status: managed; read access available; manifest available.',
+			'Remote connection OK. A synced configuration with 1 file is available.',
 			'info',
 		);
 		expect(server.requests).not.toEqual(
@@ -497,6 +511,51 @@ describe('sync command registration', () => {
 			]),
 		);
 		expect(await readConfig(root)).toMatchObject({ connection: { password: 'password' } });
+	});
+
+	it('reports a read-only connection and an empty remote in user terms', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'sync-root',
+			url: server.baseUrl,
+			username: 'alice',
+		});
+		await writeConfig(root, {
+			connection: { ...connection, readOnly: true },
+			pushInclude: [parsePushInclude('settings.json')],
+			version: 1,
+		});
+		const store = new RemoteStore(
+			createWebDavGateway(connection),
+			parseRemotePath(connection.remotePath),
+		);
+		await store.ensureRoot();
+		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
+		registerSyncWebdavCommands(
+			{
+				registerCommand: vi.fn(
+					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
+						registered = options;
+					},
+				),
+			} as unknown as ExtensionAPI,
+			() => root,
+		);
+		const notify = vi.fn();
+
+		await registered?.handler('status', {
+			mode: 'print',
+			ui: { notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(notify).toHaveBeenCalledWith(
+			'Remote connection OK (read-only). No synced configuration yet.',
+			'info',
+		);
 	});
 
 	it('reports a status read failure without exposing remote details or changing configuration', async () => {
@@ -583,27 +642,25 @@ describe('sync command registration', () => {
 			() => root,
 		);
 		const notify = vi.fn();
+		const driver = createCustomDriver([
+			valueStep('Settings'),
+			valueStep('Connection'),
+			valueStep('Change password'),
+			valueStep('new-password'),
+			valueStep(true),
+			{ type: 'complete' },
+		]);
 
 		await registered?.handler('', {
 			mode: 'tui',
 			ui: {
-				confirm: vi.fn().mockResolvedValue(true),
-				custom: vi
-					.fn()
-					.mockResolvedValueOnce('new-password')
-					.mockImplementationOnce(completeCancellableCustom),
+				custom: driver.custom,
 				input: vi
 					.fn()
 					.mockResolvedValueOnce(server.baseUrl)
 					.mockResolvedValueOnce('new-root')
 					.mockResolvedValueOnce('bob'),
 				notify,
-				select: vi
-					.fn()
-					.mockResolvedValueOnce('settings')
-					.mockResolvedValueOnce('Connection')
-					.mockResolvedValueOnce('Change password')
-					.mockResolvedValueOnce('Cancel'),
 			},
 		} as unknown as ExtensionCommandContext);
 
@@ -611,7 +668,7 @@ describe('sync command registration', () => {
 		expect(notify).toHaveBeenCalledWith('WebDAV authorization failed', 'error');
 	});
 
-	it('requires review confirmation before saving a changed push selection', async () => {
+	it('saves a changed push selection directly without a review step', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
 		temporaryDirectories.push(root);
 		const server = await MockWebDavServer.create();
@@ -638,31 +695,26 @@ describe('sync command registration', () => {
 			} as unknown as ExtensionAPI,
 			() => root,
 		);
-		const confirm = vi.fn().mockResolvedValue(false);
+		const notify = vi.fn();
+		const driver = createCustomDriver([
+			valueStep('Settings'),
+			valueStep('Push selection'),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('AGENTS.md')]),
+			valueStep('Cancel'),
+		]);
 
 		await registered?.handler('', {
 			mode: 'tui',
-			ui: {
-				confirm,
-				custom: vi
-					.fn()
-					.mockImplementationOnce(completeCancellableCustom)
-					.mockResolvedValue([parsePushInclude('AGENTS.md')]),
-				input: vi.fn(),
-				notify: vi.fn(),
-				select: vi
-					.fn()
-					.mockResolvedValueOnce('settings')
-					.mockResolvedValueOnce('Push selection')
-					.mockResolvedValueOnce('Cancel'),
-			},
+			ui: { custom: driver.custom, input: vi.fn(), notify },
 		} as unknown as ExtensionCommandContext);
 
-		expect(confirm).toHaveBeenCalledWith('Save push selection?', 'INCLUDE AGENTS.md');
+		expect(driver.calls()).toBe(5);
 		expect(await readConfig(root)).toMatchObject({
-			pushInclude: [parsePushInclude('settings.json')],
+			pushInclude: [parsePushInclude('AGENTS.md')],
 		});
 		expect(server.requests).toEqual([]);
+		expect(notify).toHaveBeenCalledWith('Push selection saved.', 'info');
 	});
 
 	it('cleans only verified remote residue from the dashboard after confirmation', async () => {
@@ -706,17 +758,18 @@ describe('sync command registration', () => {
 			() => root,
 		);
 		const notify = vi.fn();
+		const driver = createCustomDriver([
+			valueStep('Clean remote residue'),
+			{ type: 'complete' },
+			valueStep(true),
+			{ type: 'complete' },
+		]);
 
 		await registered?.handler('', {
 			mode: 'tui',
 			ui: {
-				confirm: vi.fn().mockResolvedValue(true),
-				custom: vi
-					.fn()
-					.mockImplementationOnce(completeCancellableCustom)
-					.mockImplementationOnce(completeCancellableCustom),
+				custom: driver.custom,
 				notify,
-				select: vi.fn().mockResolvedValue('Clean remote residue'),
 			},
 		} as unknown as ExtensionCommandContext);
 
@@ -729,7 +782,7 @@ describe('sync command registration', () => {
 		expect(notify).toHaveBeenCalledWith('Remote residue cleaned.', 'info');
 	});
 
-	it('warns about privacy and size before including sessions', async () => {
+	it('warns when adding sessions to the push selection for the first time', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
 		temporaryDirectories.push(root);
 		const connection = normalizeConnection({
@@ -740,7 +793,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: true },
-			pushInclude: [parsePushInclude('sessions')],
+			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
 		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
@@ -754,17 +807,69 @@ describe('sync command registration', () => {
 			} as unknown as ExtensionAPI,
 			() => root,
 		);
-		const confirm = vi.fn().mockResolvedValue(false);
+		const driver = createCustomDriver([
+			valueStep('Settings'),
+			valueStep('Push selection'),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('settings.json'), parsePushInclude('sessions')]),
+			valueStep(true),
+			valueStep('Cancel'),
+		]);
 
-		await registered?.handler('push', {
+		await registered?.handler('', {
 			mode: 'tui',
-			ui: { confirm, notify: vi.fn() },
+			ui: { custom: driver.custom, input: vi.fn(), notify: vi.fn() },
 		} as unknown as ExtensionCommandContext);
 
-		expect(confirm).toHaveBeenCalledWith(
-			'Include sessions?',
-			'Session data may contain private conversation content and can be large. Continue?',
+		expect(driver.calls()).toBe(6);
+		expect(await readConfig(root)).toMatchObject({
+			pushInclude: [parsePushInclude('settings.json'), parsePushInclude('sessions')],
+		});
+	});
+
+	it('does not warn again for sensitive paths that are already approved', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'sync-root',
+			url: 'https://example.com/dav',
+			username: 'alice',
+		});
+		const pushInclude = [parsePushInclude('settings.json'), parsePushInclude('sessions')];
+		await writeConfig(root, {
+			connection: { ...connection, readOnly: true },
+			pushInclude,
+			version: 1,
+		});
+		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
+		registerSyncWebdavCommands(
+			{
+				registerCommand: vi.fn(
+					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
+						registered = options;
+					},
+				),
+			} as unknown as ExtensionAPI,
+			() => root,
 		);
+		// No confirmation step is scripted: an unexpected warning would consume the
+		// Cancel step and leave the settings loop without a way to exit.
+		const driver = createCustomDriver([
+			valueStep('Settings'),
+			valueStep('Push selection'),
+			{ type: 'complete' },
+			valueStep(pushInclude),
+			valueStep('Cancel'),
+		]);
+
+		await registered?.handler('', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input: vi.fn(), notify: vi.fn() },
+		} as unknown as ExtensionCommandContext);
+
+		expect(driver.calls()).toBe(5);
+		expect(await readConfig(root)).toMatchObject({ pushInclude });
 	});
 
 	it('persists read-only capability by hiding push from the dashboard and rejecting it directly', async () => {
@@ -790,21 +895,32 @@ describe('sync command registration', () => {
 			),
 		} as unknown as ExtensionAPI;
 		registerSyncWebdavCommands(pi, () => root);
-		const select = vi.fn().mockResolvedValue('cancel');
+		let dashboardLines: string[] = [];
+		const driver = createCustomDriver([
+			{
+				type: 'inspect',
+				onRender: (lines) => {
+					dashboardLines = lines;
+				},
+				value: 'Cancel',
+			},
+		]);
 		const notify = vi.fn();
 
 		await registered?.handler('', {
 			mode: 'tui',
-			ui: { notify, select },
+			ui: { custom: driver.custom, notify },
 		} as unknown as ExtensionCommandContext);
-		expect(select).toHaveBeenCalledWith(
-			'WebDAV sync',
-			expect.not.arrayContaining(['push', 'Clean remote residue']),
-		);
+		const dashboardText = dashboardLines.join('\n');
+		expect(dashboardText).toContain('WebDAV sync');
+		expect(dashboardText).toContain('Pull');
+		expect(dashboardText).toContain('Cancel');
+		expect(dashboardText).not.toContain('Push');
+		expect(dashboardText).not.toContain('Clean remote residue');
 
 		await registered?.handler('push', {
 			mode: 'tui',
-			ui: { notify, select },
+			ui: { custom: driver.custom, notify },
 		} as unknown as ExtensionCommandContext);
 		expect(notify).toHaveBeenCalledWith(
 			'Push is unavailable because the remote connection is read-only.',

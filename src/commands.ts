@@ -29,10 +29,11 @@ import {
 import { planPush } from './sync-plan.js';
 import { createWebDavGateway } from './webdav.js';
 import {
-	confirmPushSelection,
+	confirmDialog,
 	confirmSyncPlan,
 	formatPlanLines,
 	runCancellableOperation,
+	selectOption,
 	selectPushIncludes,
 } from './ui.js';
 
@@ -40,6 +41,7 @@ const SUBCOMMANDS = ['settings', 'status', 'diff', 'push', 'pull', 'restore'] as
 const SETTINGS_OPTIONS = ['Connection', 'Push selection', 'Cancel'] as const;
 const PASSWORD_OPTIONS = ['Keep current password', 'Change password', 'Cancel'] as const;
 const CLEANUP_OPTION = 'Clean remote residue';
+const CANCEL_OPTION = 'Cancel';
 
 type SyncWebdavSubcommand = (typeof SUBCOMMANDS)[number] | 'dashboard';
 
@@ -105,10 +107,12 @@ async function requireConfig(agentRoot: string): Promise<PluginConfig> {
 async function confirmOptionalPaths(
 	ctx: ExtensionCommandContext,
 	paths: readonly string[],
+	previouslyApproved: readonly string[],
 ): Promise<boolean> {
-	if (hasPath(paths, 'sessions')) {
+	if (hasPath(paths, 'sessions') && !hasPath(previouslyApproved, 'sessions')) {
 		if (
-			!(await ctx.ui.confirm(
+			!(await confirmDialog(
+				ctx,
 				'Include sessions?',
 				'Session data may contain private conversation content and can be large. Continue?',
 			))
@@ -116,9 +120,10 @@ async function confirmOptionalPaths(
 			return false;
 		}
 	}
-	if (hasPath(paths, 'auth.json')) {
+	if (hasPath(paths, 'auth.json') && !hasPath(previouslyApproved, 'auth.json')) {
 		if (
-			!(await ctx.ui.confirm(
+			!(await confirmDialog(
+				ctx,
 				'Include authentication?',
 				'Authentication data is sensitive. Continue?',
 			))
@@ -171,8 +176,8 @@ async function promptConnection(
 		}
 		password = enteredPassword;
 	} else {
-		const choice = await ctx.ui.select('WebDAV password', [...PASSWORD_OPTIONS]);
-		if (choice === undefined || choice === 'Cancel') {
+		const choice = await selectOption(ctx, 'WebDAV password', PASSWORD_OPTIONS);
+		if (choice === undefined || choice === CANCEL_OPTION) {
 			return undefined;
 		}
 		if (choice === 'Keep current password') {
@@ -189,7 +194,8 @@ async function promptConnection(
 	const connection = normalizeConnection({ password, remotePath, url, username });
 	if (
 		connection.requiresInsecureTransportConfirmation &&
-		!(await ctx.ui.confirm(
+		!(await confirmDialog(
+			ctx,
 			'Use HTTP?',
 			'HTTP sends WebDAV credentials without transport encryption. Continue?',
 		))
@@ -227,13 +233,13 @@ async function saveConnection(
 		}
 	});
 	if (validation.cancelled || validation.value === undefined) {
-		ctx.ui.notify('Connection validation cancelled.', 'info');
 		if (cancelledProbeCleanupFailed) {
 			ctx.ui.notify(
 				'Remote validation residue may remain. Reopen WebDAV sync, then use dashboard cleanup.',
 				'warning',
 			);
 		}
+		ctx.ui.notify('Connection validation cancelled.', 'info');
 		return undefined;
 	}
 	const writeCapability = validation.value;
@@ -249,15 +255,15 @@ async function saveConnection(
 		version: 1,
 	};
 	await writeConfig(agentRoot, config);
+	if (writeCapability.cleanupFailed) {
+		ctx.ui.notify('Remote validation residue may remain. Use dashboard cleanup.', 'warning');
+	}
 	ctx.ui.notify(
 		writeCapability.canWrite
 			? 'WebDAV connection saved.'
 			: 'WebDAV connection saved in read-only mode.',
 		writeCapability.canWrite ? 'info' : 'warning',
 	);
-	if (writeCapability.cleanupFailed) {
-		ctx.ui.notify('Remote validation residue may remain. Use dashboard cleanup.', 'warning');
-	}
 	return config;
 }
 
@@ -274,11 +280,7 @@ async function runInitialConfiguration(
 		return;
 	}
 	const pushInclude = await selectPushIncludes(ctx, candidates, DEFAULT_PUSH_INCLUDES);
-	if (
-		pushInclude === undefined ||
-		!(await confirmOptionalPaths(ctx, pushInclude)) ||
-		!(await confirmPushSelection(ctx, pushInclude))
-	) {
+	if (pushInclude === undefined || !(await confirmOptionalPaths(ctx, pushInclude, []))) {
 		return;
 	}
 	await saveConnection(ctx, agentRoot, undefined, connection, pushInclude);
@@ -292,8 +294,8 @@ async function runSettings(ctx: ExtensionCommandContext, agentRoot: string): Pro
 	}
 
 	while (true) {
-		const choice = await ctx.ui.select('WebDAV sync settings', [...SETTINGS_OPTIONS]);
-		if (choice === undefined || choice === 'Cancel') {
+		const choice = await selectOption(ctx, 'WebDAV sync settings', SETTINGS_OPTIONS);
+		if (choice === undefined || choice === CANCEL_OPTION) {
 			return;
 		}
 		if (choice === 'Connection') {
@@ -314,8 +316,7 @@ async function runSettings(ctx: ExtensionCommandContext, agentRoot: string): Pro
 		const pushInclude = await selectPushIncludes(ctx, candidates, config.pushInclude);
 		if (
 			pushInclude === undefined ||
-			!(await confirmOptionalPaths(ctx, pushInclude)) ||
-			!(await confirmPushSelection(ctx, pushInclude))
+			!(await confirmOptionalPaths(ctx, pushInclude, config.pushInclude))
 		) {
 			continue;
 		}
@@ -340,10 +341,26 @@ async function runStatus(ctx: ExtensionCommandContext, agentRoot: string): Promi
 		ctx.ui.notify('Status check cancelled.', 'info');
 		return;
 	}
+	const { manifest, root } = result.value;
+	if (root.kind === 'foreign') {
+		ctx.ui.notify(
+			'The remote folder contains unrecognized files; sync data is unavailable.',
+			'warning',
+		);
+		return;
+	}
+	const mode = config.connection.readOnly ? ' (read-only)' : '';
+	if (root.kind === 'missing') {
+		ctx.ui.notify(`Remote connection OK${mode}. The remote folder does not exist yet.`, 'info');
+		return;
+	}
+	if (manifest === undefined) {
+		ctx.ui.notify(`Remote connection OK${mode}. No synced configuration yet.`, 'info');
+		return;
+	}
+	const count = manifest.manifest.files.length;
 	ctx.ui.notify(
-		`Remote status: ${result.value.root.kind}; read access available; manifest ${
-			result.value.manifest === undefined ? 'not found' : 'available'
-		}.`,
+		`Remote connection OK${mode}. A synced configuration with ${count} ${count === 1 ? 'file' : 'files'} is available.`,
 		'info',
 	);
 }
@@ -378,9 +395,6 @@ async function runDiff(ctx: ExtensionCommandContext, agentRoot: string): Promise
 
 async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
 	const config = await requireConfig(agentRoot);
-	if (!(await confirmOptionalPaths(ctx, config.pushInclude))) {
-		return;
-	}
 	const store = createStore(config);
 	if (config.connection.readOnly) {
 		ctx.ui.notify('Push is unavailable because the remote connection is read-only.', 'warning');
@@ -400,7 +414,8 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 	}
 	if (
 		preparation.requiresUnverifiedManifestConfirmation &&
-		!(await ctx.ui.confirm(
+		!(await confirmDialog(
+			ctx,
 			'Overwrite unverified manifest?',
 			'The current remote manifest cannot be verified. Continue with a new manifest?',
 		))
@@ -408,7 +423,7 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 		return;
 	}
 	if (
-		!(await confirmSyncPlan(ctx, 'Push configuration?', {
+		!(await confirmSyncPlan(ctx, 'Push these changes to WebDAV?', {
 			files: preparation.plan.actions,
 			warnings: [
 				...(preparation.selection.secretWarningPaths.length > 0
@@ -450,17 +465,17 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 			...config,
 			connection: { ...config.connection, readOnly: true },
 		});
-		ctx.ui.notify('Push is unavailable because the remote connection is read-only.', 'warning');
 		if (published.value.writeCapability.cleanupFailed) {
 			ctx.ui.notify('Remote validation residue may remain. Use dashboard cleanup.', 'warning');
 		}
+		ctx.ui.notify('Push is unavailable because the remote connection is read-only.', 'warning');
 		return;
 	}
 	if (published.value === undefined) {
-		ctx.ui.notify('Push cancelled.', 'info');
 		if (cancelledProbeCleanupFailed) {
 			ctx.ui.notify('Remote validation residue may remain. Use dashboard cleanup.', 'warning');
 		}
+		ctx.ui.notify('Push cancelled.', 'info');
 		return;
 	}
 	if (published.value.result.previousRevisionCleanup === 'failed') {
@@ -492,15 +507,7 @@ async function runPull(ctx: ExtensionCommandContext, agentRoot: string): Promise
 		return;
 	}
 	if (
-		!(await confirmOptionalPaths(
-			ctx,
-			preparation.plan.actions.map((action) => action.path),
-		))
-	) {
-		return;
-	}
-	if (
-		!(await confirmSyncPlan(ctx, 'Pull configuration?', {
+		!(await confirmSyncPlan(ctx, 'Apply these changes from WebDAV?', {
 			files: preparation.plan.actions,
 			packages: preparation.packageOperations,
 			warnings:
@@ -548,7 +555,11 @@ async function runPull(ctx: ExtensionCommandContext, agentRoot: string): Promise
 	}
 	if (
 		preparation.plan.actions.length > 0 &&
-		(await ctx.ui.confirm('Reload Pi?', 'Reload Pi resources to apply the pulled configuration?'))
+		(await confirmDialog(
+			ctx,
+			'Reload Pi?',
+			'Reload Pi resources to apply the pulled configuration?',
+		))
 	) {
 		await ctx.reload();
 	}
@@ -568,15 +579,7 @@ async function runRestore(ctx: ExtensionCommandContext, agentRoot: string): Prom
 		return;
 	}
 	const plan = prepared.value;
-	if (
-		!(await confirmOptionalPaths(
-			ctx,
-			plan.actions.map((action) => action.path),
-		))
-	) {
-		return;
-	}
-	if (!(await confirmSyncPlan(ctx, 'Restore local backups?', { files: plan.actions }))) {
+	if (!(await confirmSyncPlan(ctx, 'Restore these local backups?', { files: plan.actions }))) {
 		return;
 	}
 	const restored = await runCommandOperation(ctx, { phase: 'restoring' }, (operation) =>
@@ -601,7 +604,9 @@ async function runRestore(ctx: ExtensionCommandContext, agentRoot: string): Prom
 			: 'Local backups restored.',
 		restored.cancelled ? 'warning' : 'info',
 	);
-	if (await ctx.ui.confirm('Reload Pi?', 'Reload Pi resources to apply restored configuration?')) {
+	if (
+		await confirmDialog(ctx, 'Reload Pi?', 'Reload Pi resources to apply restored configuration?')
+	) {
 		await ctx.reload();
 	}
 }
@@ -634,7 +639,7 @@ async function runCleanup(ctx: ExtensionCommandContext, agentRoot: string): Prom
 		return;
 	}
 	if (
-		!(await confirmSyncPlan(ctx, 'Clean remote residue?', {
+		!(await confirmSyncPlan(ctx, 'Delete this remote residue?', {
 			files: residue.candidates.map((candidate) => ({
 				action: 'delete' as const,
 				path: candidate.path,
@@ -662,25 +667,42 @@ async function runCleanup(ctx: ExtensionCommandContext, agentRoot: string): Prom
 	ctx.ui.notify('Remote residue cleaned.', 'info');
 }
 
+function capitalize(value: string): string {
+	return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
 async function runDashboard(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
 	const config = await readConfig(agentRoot);
 	if (config === undefined) {
 		await runSettings(ctx, agentRoot);
 		return;
 	}
-	const options = [
-		...SUBCOMMANDS.filter((command) => command !== 'push' || !config.connection.readOnly),
-		...(!config.connection.readOnly ? [CLEANUP_OPTION] : []),
+	const entries: ReadonlyArray<{
+		readonly command: SyncWebdavSubcommand | 'cancel' | 'cleanup';
+		readonly label: string;
+	}> = [
+		...SUBCOMMANDS.filter((command) => command !== 'push' || !config.connection.readOnly).map(
+			(command) => ({ command, label: capitalize(command) }),
+		),
+		...(!config.connection.readOnly
+			? [{ command: 'cleanup' as const, label: CLEANUP_OPTION }]
+			: []),
+		{ command: 'cancel' as const, label: CANCEL_OPTION },
 	];
-	const choice = await ctx.ui.select('WebDAV sync', [...options, 'cancel']);
-	if (choice === undefined || choice === 'cancel') {
+	const choice = await selectOption(
+		ctx,
+		'WebDAV sync',
+		entries.map((entry) => entry.label),
+	);
+	const entry = entries.find((candidate) => candidate.label === choice);
+	if (entry === undefined || entry.command === 'cancel') {
 		return;
 	}
-	if (choice === CLEANUP_OPTION) {
+	if (entry.command === 'cleanup') {
 		await runCleanup(ctx, agentRoot);
 		return;
 	}
-	await runCommand(choice as SyncWebdavSubcommand, ctx, agentRoot);
+	await runCommand(entry.command, ctx, agentRoot);
 }
 
 async function runCommand(

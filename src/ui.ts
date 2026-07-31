@@ -1,5 +1,17 @@
-import type { ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
-import { CancellableLoader, Key, matchesKey, truncateToWidth } from '@earendil-works/pi-tui';
+import type { ExtensionCommandContext, Theme } from '@earendil-works/pi-coding-agent';
+import { DynamicBorder } from '@earendil-works/pi-coding-agent';
+import {
+	CancellableLoader,
+	Container,
+	Key,
+	matchesKey,
+	Spacer,
+	Text,
+	truncateToWidth,
+	type Component,
+	type KeybindingsManager,
+	type TUI,
+} from '@earendil-works/pi-tui';
 
 import {
 	isOperationCancelled,
@@ -42,6 +54,187 @@ export function formatOperationProgress(progress: OperationProgress): string {
 	}
 }
 
+type KeyHint = readonly [keys: string, description: string];
+
+/**
+ * Formats keybinding hints like pi's keyHint/rawKeyHint, but uses the theme
+ * from the custom() callback because the global theme is not reliable inside
+ * jiti-loaded extensions.
+ */
+export function formatKeyHints(theme: Theme, hints: readonly KeyHint[]): string {
+	return hints
+		.map(([keys, description]) => theme.fg('dim', keys) + theme.fg('muted', ` ${description}`))
+		.join('  ');
+}
+
+function bindingKeys(
+	keybindings: KeybindingsManager,
+	binding: 'tui.select.cancel' | 'tui.select.confirm',
+): string {
+	return keybindings.getKeys(binding).join('/');
+}
+
+/**
+ * Assembles a framed dialog with the same layout as pi's built-in selector,
+ * input, and loader dialogs: border, accent title, body, key hints, border.
+ */
+export function createDialogContainer(input: {
+	readonly body: Component | readonly Component[];
+	readonly boldTitle?: boolean;
+	readonly hints?: string;
+	readonly theme: Theme;
+	readonly title: string;
+}): Container {
+	const { theme } = input;
+	const border = (text: string): string => theme.fg('border', text);
+	const container = new Container();
+	container.addChild(new DynamicBorder(border));
+	container.addChild(new Spacer(1));
+	container.addChild(
+		new Text(
+			input.boldTitle === false
+				? theme.fg('accent', input.title)
+				: theme.fg('accent', theme.bold(input.title)),
+			1,
+			0,
+		),
+	);
+	container.addChild(new Spacer(1));
+	const body = Array.isArray(input.body) ? input.body : [input.body];
+	for (const child of body) {
+		container.addChild(child);
+	}
+	if (input.hints !== undefined) {
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(input.hints, 1, 0));
+	}
+	container.addChild(new Spacer(1));
+	container.addChild(new DynamicBorder(border));
+	return container;
+}
+
+/** Moves a list cursor cyclically, matching pi-tui SelectList navigation. */
+function moveCyclic(index: number, delta: -1 | 1, length: number): number {
+	return (index + delta + length) % length;
+}
+
+/** Option rows styled like pi's ExtensionSelectorComponent, with cyclic navigation. */
+class OptionListBody implements Component {
+	#index = 0;
+
+	constructor(
+		private readonly keybindings: KeybindingsManager,
+		private readonly onCancel: () => void,
+		private readonly onSubmit: (index: number) => void,
+		private readonly options: readonly string[],
+		private readonly theme: Theme,
+		private readonly tui: TUI,
+	) {}
+
+	get index(): number {
+		return this.#index;
+	}
+
+	handleInput(data: string): void {
+		if (this.keybindings.matches(data, 'tui.select.up') || data === 'k') {
+			this.#index = moveCyclic(this.#index, -1, this.options.length);
+			this.tui.requestRender();
+		} else if (this.keybindings.matches(data, 'tui.select.down') || data === 'j') {
+			this.#index = moveCyclic(this.#index, 1, this.options.length);
+			this.tui.requestRender();
+		} else if (this.keybindings.matches(data, 'tui.select.confirm') || data === '\n') {
+			this.onSubmit(this.#index);
+		} else if (this.keybindings.matches(data, 'tui.select.cancel')) {
+			this.onCancel();
+		}
+	}
+
+	invalidate(): void {
+		// Stateless: rows are rebuilt from the current index on every render.
+	}
+
+	render(width: number): string[] {
+		return this.options.map((option, optionIndex) => {
+			const line =
+				optionIndex === this.#index
+					? this.theme.fg('accent', '→ ') + this.theme.fg('accent', option)
+					: `  ${this.theme.fg('text', option)}`;
+			return truncateToWidth(` ${line}`, width);
+		});
+	}
+}
+
+export async function selectOption(
+	ctx: ExtensionCommandContext,
+	title: string,
+	options: readonly string[],
+): Promise<string | undefined> {
+	if (ctx.mode !== 'tui' || options.length === 0) {
+		return undefined;
+	}
+	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
+		const list = new OptionListBody(
+			keybindings,
+			() => done(undefined),
+			(index) => done(options[index]),
+			options,
+			theme,
+			tui,
+		);
+		const container = createDialogContainer({
+			body: list,
+			hints: formatKeyHints(theme, [
+				['↑↓', 'navigate'],
+				[bindingKeys(keybindings, 'tui.select.confirm'), 'select'],
+				[bindingKeys(keybindings, 'tui.select.cancel'), 'cancel'],
+			]),
+			theme,
+			title,
+		});
+		return {
+			handleInput: (data: string) => list.handleInput(data),
+			invalidate: () => container.invalidate(),
+			render: (width: number) => container.render(width),
+		};
+	});
+}
+
+export async function confirmDialog(
+	ctx: ExtensionCommandContext,
+	title: string,
+	message: string,
+): Promise<boolean> {
+	if (ctx.mode !== 'tui') {
+		return false;
+	}
+	return ctx.ui.custom<boolean>((tui, theme, keybindings, done) => {
+		const options = ['Yes', 'No'] as const;
+		const list = new OptionListBody(
+			keybindings,
+			() => done(false),
+			(index) => done(options[index] === 'Yes'),
+			options,
+			theme,
+			tui,
+		);
+		const container = createDialogContainer({
+			body: [new Text(theme.fg('text', message), 1, 0), new Spacer(1), list],
+			hints: formatKeyHints(theme, [
+				['↑↓', 'navigate'],
+				[bindingKeys(keybindings, 'tui.select.confirm'), 'select'],
+				[bindingKeys(keybindings, 'tui.select.cancel'), 'cancel'],
+			]),
+			theme,
+			title,
+		});
+		return {
+			handleInput: (data: string) => list.handleInput(data),
+			invalidate: () => container.invalidate(),
+			render: (width: number) => container.render(width),
+		};
+	});
+}
+
 export async function runCancellableOperation<T>(
 	ctx: ExtensionCommandContext,
 	initialProgress: OperationProgress,
@@ -52,7 +245,7 @@ export async function runCancellableOperation<T>(
 	}
 	let failure: unknown;
 	const result = await ctx.ui.custom<CancellableOperationResult<T>>(
-		(tui, theme, _keybindings, done) => {
+		(tui, theme, keybindings, done) => {
 			const loader = new CancellableLoader(
 				tui,
 				(value) => theme.fg('accent', value),
@@ -83,7 +276,26 @@ export async function runCancellableOperation<T>(
 					finish({ cancelled: loader.aborted, value: undefined });
 				},
 			);
-			return loader;
+			const container = new Container();
+			const border = (text: string): string => theme.fg('border', text);
+			container.addChild(new DynamicBorder(border));
+			container.addChild(loader);
+			container.addChild(new Spacer(1));
+			container.addChild(
+				new Text(
+					formatKeyHints(theme, [[bindingKeys(keybindings, 'tui.select.cancel'), 'cancel']]),
+					1,
+					0,
+				),
+			);
+			container.addChild(new Spacer(1));
+			container.addChild(new DynamicBorder(border));
+			return {
+				dispose: () => loader.dispose(),
+				handleInput: (data: string) => loader.handleInput(data),
+				invalidate: () => container.invalidate(),
+				render: (width: number) => container.render(width),
+			};
 		},
 	);
 	if (failure !== undefined) {
@@ -92,38 +304,52 @@ export async function runCancellableOperation<T>(
 	return result;
 }
 
-export async function confirmPushSelection(
-	ctx: ExtensionCommandContext,
-	paths: readonly SafeRelativePath[],
-): Promise<boolean> {
-	if (ctx.mode !== 'tui') {
-		return false;
-	}
-	return ctx.ui.confirm(
-		'Save push selection?',
-		paths.length === 0
-			? 'No paths are selected.'
-			: paths.map((path) => `INCLUDE ${path}`).join('\n'),
-	);
-}
-
 function actionLabel(action: FileMutation['action']): string {
 	return action.toUpperCase();
 }
 
-export function formatPlanLines(input: {
-	readonly files: readonly Pick<FileMutation, 'action' | 'path'>[];
-	readonly packages?: readonly PackageOperation[];
-	readonly warnings?: readonly string[];
-}): readonly string[] {
-	return [
-		...input.files.map((file) => `${actionLabel(file.action)} ${file.path}`),
-		...(input.packages ?? []).map(
-			(operation) => `${operation.action.toUpperCase()} PACKAGE ${operation.source}`,
-		),
-		...(input.warnings ?? []).map((warning) => `Warning: ${warning}`),
-	];
+export function formatPlanLines(
+	input: {
+		readonly files: readonly Pick<FileMutation, 'action' | 'path'>[];
+		readonly packages?: readonly PackageOperation[];
+		readonly warnings?: readonly string[];
+	},
+	options?: { maxFiles?: number },
+): readonly string[] {
+	const lines: string[] = [];
+	if (input.files.length > 0) {
+		lines.push('Files:');
+		const visible =
+			options?.maxFiles === undefined ? input.files : input.files.slice(0, options.maxFiles);
+		for (const file of visible) {
+			lines.push(`  ${actionLabel(file.action)} ${file.path}`);
+		}
+		if (visible.length < input.files.length) {
+			lines.push(`  … and ${input.files.length - visible.length} more`);
+		}
+	}
+	if (input.packages !== undefined && input.packages.length > 0) {
+		if (lines.length > 0) {
+			lines.push('');
+		}
+		lines.push('Packages:');
+		for (const operation of input.packages) {
+			lines.push(`  ${operation.action.toUpperCase()} ${operation.source}`);
+		}
+	}
+	if (input.warnings !== undefined && input.warnings.length > 0) {
+		if (lines.length > 0) {
+			lines.push('');
+		}
+		lines.push('⚠️ Warnings:');
+		for (const warning of input.warnings) {
+			lines.push(`  ${warning}`);
+		}
+	}
+	return lines;
 }
+
+const MAX_PLAN_FILES = 12;
 
 export async function confirmSyncPlan(
 	ctx: ExtensionCommandContext,
@@ -133,84 +359,99 @@ export async function confirmSyncPlan(
 	if (ctx.mode !== 'tui') {
 		return false;
 	}
-	const lines = formatPlanLines(input);
-	return ctx.ui.confirm(title, lines.length === 0 ? 'No changes.' : lines.join('\n'));
+	const lines = formatPlanLines(input, { maxFiles: MAX_PLAN_FILES });
+	return confirmDialog(ctx, title, lines.length === 0 ? 'No changes.' : lines.join('\n'));
 }
+
+const VISIBLE_CANDIDATES = 12;
 
 export async function selectPushIncludes(
 	ctx: ExtensionCommandContext,
 	candidates: readonly SelectionCandidate[],
 	selectedPaths: readonly SafeRelativePath[],
 ): Promise<readonly SafeRelativePath[] | undefined> {
-	if (ctx.mode !== 'tui') {
+	if (ctx.mode !== 'tui' || candidates.length === 0) {
 		return undefined;
 	}
-	return ctx.ui.custom<readonly SafeRelativePath[] | undefined>(
-		(tui, theme, _keybindings, done) => {
-			const selected = new Set<SafeRelativePath>(selectedPaths);
-			let index = 0;
+	return ctx.ui.custom<readonly SafeRelativePath[] | undefined>((tui, theme, keybindings, done) => {
+		const selected = new Set<SafeRelativePath>(selectedPaths);
+		let index = 0;
 
-			const finish = (): void => {
-				done(
-					candidates
-						.filter((candidate) => selected.has(candidate.path))
-						.map((candidate) => candidate.path),
+		const finish = (): void => {
+			done(
+				candidates
+					.filter((candidate) => selected.has(candidate.path))
+					.map((candidate) => candidate.path),
+			);
+		};
+		const render = (width: number): string[] => {
+			const visibleCount = Math.min(VISIBLE_CANDIDATES, candidates.length);
+			const first = Math.max(
+				0,
+				Math.min(index - Math.floor(visibleCount / 2), candidates.length - visibleCount),
+			);
+			const lines: string[] = [];
+			for (const [offset, candidate] of candidates.slice(first, first + visibleCount).entries()) {
+				const candidateIndex = first + offset;
+				const focused = candidateIndex === index;
+				const marker = selected.has(candidate.path) ? '[x]' : '[ ]';
+				const cursor = focused ? '→ ' : '  ';
+				const defaultLabel = candidate.defaultSelected ? ' (default)' : '';
+				const text = `${cursor}${marker} ${candidate.path}${defaultLabel}`;
+				lines.push(truncateToWidth(` ${theme.fg(focused ? 'accent' : 'text', text)}`, width));
+			}
+			if (candidates.length > visibleCount) {
+				lines.push(
+					truncateToWidth(
+						` ${theme.fg('dim', `${first + 1}-${first + visibleCount} of ${candidates.length}`)}`,
+						width,
+					),
 				);
-			};
-			const render = (width: number): string[] => {
-				const visibleCount = Math.min(12, candidates.length);
-				const first = Math.max(
-					0,
-					Math.min(index - Math.floor(visibleCount / 2), candidates.length - visibleCount),
-				);
-				const lines = [theme.fg('accent', 'Select push items')];
-				for (const [offset, candidate] of candidates.slice(first, first + visibleCount).entries()) {
-					const candidateIndex = first + offset;
-					const marker = selected.has(candidate.path) ? '[x]' : '[ ]';
-					const cursor = candidateIndex === index ? '> ' : '  ';
-					const defaultLabel = candidate.defaultSelected ? ' (default)' : '';
-					const text = `${cursor}${marker} ${candidate.path}${defaultLabel}`;
-					lines.push(
-						truncateToWidth(theme.fg(candidateIndex === index ? 'accent' : 'text', text), width),
-					);
+			}
+			return lines;
+		};
+		const handleInput = (data: string): void => {
+			if (keybindings.matches(data, 'tui.select.cancel')) {
+				done(undefined);
+				return;
+			}
+			if (keybindings.matches(data, 'tui.select.up') || data === 'k') {
+				index = moveCyclic(index, -1, candidates.length);
+			} else if (keybindings.matches(data, 'tui.select.down') || data === 'j') {
+				index = moveCyclic(index, 1, candidates.length);
+			} else if (matchesKey(data, Key.space)) {
+				const candidate = candidates[index];
+				if (candidate !== undefined) {
+					if (selected.has(candidate.path)) {
+						selected.delete(candidate.path);
+					} else {
+						selected.add(candidate.path);
+					}
 				}
-				if (candidates.length > visibleCount) {
-					lines.push(
-						theme.fg('dim', `${first + 1}-${first + visibleCount} of ${candidates.length}`),
-					);
-				}
-				lines.push(theme.fg('dim', '↑↓ move • Space toggle • Enter save • Esc cancel'));
-				return lines;
-			};
+			} else if (keybindings.matches(data, 'tui.select.confirm') || data === '\n') {
+				finish();
+				return;
+			} else {
+				return;
+			}
+			tui.requestRender();
+		};
 
-			return {
-				handleInput: (data: string) => {
-					if (matchesKey(data, Key.escape)) {
-						done(undefined);
-						return;
-					}
-					if (matchesKey(data, Key.up)) {
-						index = Math.max(0, index - 1);
-					} else if (matchesKey(data, Key.down)) {
-						index = Math.min(candidates.length - 1, index + 1);
-					} else if (matchesKey(data, Key.space)) {
-						const candidate = candidates[index];
-						if (candidate !== undefined) {
-							if (selected.has(candidate.path)) {
-								selected.delete(candidate.path);
-							} else {
-								selected.add(candidate.path);
-							}
-						}
-					} else if (matchesKey(data, Key.enter)) {
-						finish();
-						return;
-					}
-					tui.requestRender();
-				},
-				invalidate: () => undefined,
-				render,
-			};
-		},
-	);
+		const container = createDialogContainer({
+			body: { invalidate: () => undefined, render },
+			hints: formatKeyHints(theme, [
+				['↑↓', 'navigate'],
+				['space', 'toggle'],
+				[bindingKeys(keybindings, 'tui.select.confirm'), 'save'],
+				[bindingKeys(keybindings, 'tui.select.cancel'), 'cancel'],
+			]),
+			theme,
+			title: 'Select push items',
+		});
+		return {
+			handleInput,
+			invalidate: () => container.invalidate(),
+			render: (width: number) => container.render(width),
+		};
+	});
 }
