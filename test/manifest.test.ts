@@ -134,6 +134,26 @@ describe('manifest validation', () => {
 		expect(() => validateManifest(manifest)).toThrow('Invalid manifest');
 	});
 
+	it.each([
+		{
+			files: [
+				{ path: 'Themes/dark.json', sha256: 'a'.repeat(64), size: 1 },
+				{ path: 'themes/dark.json', sha256: 'b'.repeat(64), size: 1 },
+			],
+		},
+		{
+			files: [
+				{ path: 'themes', sha256: 'a'.repeat(64), size: 1 },
+				{ path: 'themes-dark', sha256: 'b'.repeat(64), size: 1 },
+				{ path: 'Themes/dark.json', sha256: 'c'.repeat(64), size: 1 },
+			],
+		},
+	])('rejects case-insensitive and non-adjacent path collisions', ({ files }) => {
+		expect(() => validateManifest({ files, revision: generateRevisionId(), version: 1 })).toThrow(
+			'Invalid manifest',
+		);
+	});
+
 	it('rejects malformed JSON', () => {
 		expect(() => parseManifest('{')).toThrow('Manifest is not valid JSON');
 	});

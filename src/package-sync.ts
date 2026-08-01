@@ -13,14 +13,26 @@ import {
 
 interface DescribedPackageSource {
 	readonly identity: string;
+	readonly gitTransport: 'git' | 'http' | 'https' | 'ssh' | undefined;
 	readonly localPath: string | undefined;
 	readonly source: string;
 }
 
-export interface PackageOperation {
-	readonly action: 'install' | 'remove' | 'update';
-	readonly source: string;
+interface DescribedGitSource {
+	readonly identity: string;
+	readonly transport: 'git' | 'http' | 'https' | 'ssh';
 }
+
+export type PackageOperation =
+	| {
+			readonly action: 'install' | 'remove' | 'update';
+			readonly source: string;
+	  }
+	| {
+			readonly action: 'replace';
+			readonly previousSource: string;
+			readonly source: string;
+	  };
 
 export interface PackageSyncPlan {
 	readonly operations: readonly PackageOperation[];
@@ -224,7 +236,7 @@ function assertSafeGitRef(ref: string | undefined): void {
 	}
 }
 
-function hostedGitIdentity(raw: string): string | undefined {
+function describeHostedGitSource(raw: string): DescribedGitSource | undefined {
 	const match = raw.match(/^(github|gitlab|bitbucket):(.+)$/u);
 	if (match === null) {
 		return undefined;
@@ -251,10 +263,10 @@ function hostedGitIdentity(raw: string): string | undefined {
 	if (identity.split('/').some((segment) => /[@:?]/u.test(decodePackageSpecPart(segment)))) {
 		invalidPackageSource();
 	}
-	return `git:${host}/${identity}`;
+	return { identity: `git:${host}/${identity}`, transport: 'https' };
 }
 
-function gitIdentity(source: string): string | undefined {
+function describeGitSource(source: string): DescribedGitSource | undefined {
 	// Pi consumes the leading `git:` as a package-source prefix, so a bare
 	// `git://` value falls through to Pi's local-source handling.
 	if (source.startsWith('git://')) {
@@ -277,7 +289,7 @@ function gitIdentity(source: string): string | undefined {
 	if (raw.length === 0) {
 		invalidPackageSource();
 	}
-	const hosted = hostedGitIdentity(raw);
+	const hosted = describeHostedGitSource(raw);
 	if (hosted !== undefined) {
 		return hosted;
 	}
@@ -288,7 +300,10 @@ function gitIdentity(source: string): string | undefined {
 		if (host === undefined || path === undefined || host.includes('@')) {
 			invalidPackageSource();
 		}
-		return `git:${host.toLowerCase()}/${normalizeGitPath(gitRepositoryPath(path))}`;
+		return {
+			identity: `git:${host.toLowerCase()}/${normalizeGitPath(gitRepositoryPath(path))}`,
+			transport: 'ssh',
+		};
 	}
 
 	if (raw.includes('://')) {
@@ -315,7 +330,10 @@ function gitIdentity(source: string): string | undefined {
 		) {
 			invalidPackageSource();
 		}
-		return `git:${url.host.toLowerCase()}/${normalizeGitPath(gitRepositoryPath(url.pathname))}`;
+		return {
+			identity: `git:${url.host.toLowerCase()}/${normalizeGitPath(gitRepositoryPath(url.pathname))}`,
+			transport: url.protocol.slice(0, -1) as DescribedGitSource['transport'],
+		};
 	}
 
 	const separator = raw.indexOf('/');
@@ -327,7 +345,10 @@ function gitIdentity(source: string): string | undefined {
 	if ((!host.includes('.') && host !== 'localhost') || host.includes('@') || host.includes(':')) {
 		invalidPackageSource();
 	}
-	return `git:${host.toLowerCase()}/${normalizeGitPath(gitRepositoryPath(path))}`;
+	return {
+		identity: `git:${host.toLowerCase()}/${normalizeGitPath(gitRepositoryPath(path))}`,
+		transport: 'https',
+	};
 }
 
 function resolveLocalPackagePath(source: string, agentRoot: string): string {
@@ -357,14 +378,29 @@ function resolveLocalPackagePath(source: string, agentRoot: string): string {
 
 function describePackageSource(source: string, agentRoot: string): DescribedPackageSource {
 	if (source.startsWith('npm:')) {
-		return { identity: npmIdentity(source), localPath: undefined, source };
+		return {
+			gitTransport: undefined,
+			identity: npmIdentity(source),
+			localPath: undefined,
+			source,
+		};
 	}
-	const git = gitIdentity(source);
+	const git = describeGitSource(source);
 	if (git !== undefined) {
-		return { identity: git, localPath: undefined, source };
+		return {
+			gitTransport: git.transport,
+			identity: git.identity,
+			localPath: undefined,
+			source,
+		};
 	}
 	const localPath = resolveLocalPackagePath(source, agentRoot);
-	return { identity: `local:${localPath}`, localPath, source };
+	return {
+		gitTransport: undefined,
+		identity: `local:${localPath}`,
+		localPath,
+		source,
+	};
 }
 
 function sourceMap(
@@ -398,7 +434,7 @@ async function assertLocalPackageSourcesExist(
 }
 
 function compareOperations(left: PackageOperation, right: PackageOperation): number {
-	const actionOrder = { install: 2, remove: 0, update: 1 } as const;
+	const actionOrder = { install: 3, remove: 0, replace: 1, update: 2 } as const;
 	if (left.action !== right.action) {
 		return actionOrder[left.action] - actionOrder[right.action];
 	}
@@ -439,7 +475,19 @@ export async function planPackageSync(input: {
 		if (next === undefined) {
 			operations.push({ action: 'remove', source: previous.source });
 		} else if (next.source !== previous.source) {
-			operations.push({ action: 'update', source: next.source });
+			if (
+				previous.gitTransport !== undefined &&
+				next.gitTransport !== undefined &&
+				previous.gitTransport !== next.gitTransport
+			) {
+				operations.push({
+					action: 'replace',
+					previousSource: previous.source,
+					source: next.source,
+				});
+			} else {
+				operations.push({ action: 'update', source: next.source });
+			}
 		}
 	}
 	for (const [identity, next] of after) {
@@ -477,6 +525,12 @@ export async function applyPackageOperations(
 		try {
 			if (operation.action === 'remove') {
 				await packageManager.remove(operation.source);
+			} else if (operation.action === 'replace') {
+				await packageManager.remove(operation.previousSource);
+				if (operationOptions?.signal?.aborted) {
+					return cancelled();
+				}
+				await packageManager.install(operation.source);
 			} else {
 				// install() reconciles exact npm versions, while Pi's update() skips pinned npm packages.
 				await packageManager.install(operation.source);

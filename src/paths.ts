@@ -15,7 +15,7 @@ export const CONFIG_FILE_NAME = 'config.json';
 const DRIVE_PREFIX_PATTERN = /^[a-zA-Z]:/u;
 const WINDOWS_FORBIDDEN_PATH_CHARACTER_PATTERN = /[<>:"|?*]/u;
 const WINDOWS_RESERVED_DEVICE_NAME_PATTERN =
-	/^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9]|lpt[1-9])(?:\..*)?$/iu;
+	/^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\..*)?$/iu;
 const PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES = new Set(['npm', 'git', PRIVATE_DIRECTORY_NAME]);
 const RECURSIVELY_EXCLUDED_NAMES = new Set(['logs', 'node_modules']);
 
@@ -46,8 +46,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function assertNonEmptyString(value: unknown, message: string): asserts value is string {
-	if (typeof value !== 'string' || value.length === 0) {
+	if (typeof value !== 'string' || value.length === 0 || !value.isWellFormed()) {
 		throw new Error(message);
+	}
+}
+
+interface PathNode {
+	readonly children: Map<string, PathNode>;
+	terminal: boolean;
+}
+
+function pathNode(): PathNode {
+	return { children: new Map(), terminal: false };
+}
+
+export function assertNoPathCollisions(
+	paths: readonly SafeRelativePath[],
+	errorMessage: string,
+	caseInsensitive = true,
+): void {
+	const root = pathNode();
+	for (const path of paths) {
+		let node = root;
+		const components = path
+			.split('/')
+			.map((component) => (caseInsensitive ? component.toLocaleLowerCase('en-US') : component));
+		for (const component of components) {
+			if (node.terminal) {
+				throw new Error(errorMessage);
+			}
+			let child = node.children.get(component);
+			if (child === undefined) {
+				child = pathNode();
+				node.children.set(component, child);
+			}
+			node = child;
+		}
+		if (node.terminal || node.children.size > 0) {
+			throw new Error(errorMessage);
+		}
+		node.terminal = true;
 	}
 }
 

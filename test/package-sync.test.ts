@@ -45,7 +45,7 @@ describe('package synchronization planning', () => {
 		});
 	});
 
-	it('updates a Git package when its transport changes', async () => {
+	it('replaces a Git package when its transport changes', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-package-sync-');
 		temporaryDirectories.push(root);
 
@@ -56,7 +56,13 @@ describe('package synchronization planning', () => {
 				before: ['git:git@github.com:acme/plugin@v1'],
 			}),
 		).resolves.toEqual({
-			operations: [{ action: 'update', source: 'https://github.com/acme/plugin@v2' }],
+			operations: [
+				{
+					action: 'replace',
+					previousSource: 'git:git@github.com:acme/plugin@v1',
+					source: 'https://github.com/acme/plugin@v2',
+				},
+			],
 		});
 	});
 
@@ -264,6 +270,62 @@ describe('package synchronization planning', () => {
 });
 
 describe('package operation execution', () => {
+	it('removes the old Git source before installing a new transport and installs pinned npm updates', async () => {
+		const calls: string[] = [];
+		const packageManager = {
+			install: async (source: string): Promise<void> => {
+				calls.push(`install:${source}`);
+			},
+			remove: async (source: string): Promise<void> => {
+				calls.push(`remove:${source}`);
+			},
+		};
+		const operations = [
+			{
+				action: 'replace' as const,
+				previousSource: 'git:git@github.com:acme/plugin@v1',
+				source: 'https://github.com/acme/plugin@v2',
+			},
+			{ action: 'update' as const, source: 'npm:@acme/theme@2.0.0' },
+		];
+
+		await expect(applyPackageOperations(packageManager, operations)).resolves.toEqual({
+			failed: [],
+			failureMessage: undefined,
+			succeeded: operations,
+		});
+		expect(calls).toEqual([
+			'remove:git:git@github.com:acme/plugin@v1',
+			'install:https://github.com/acme/plugin@v2',
+			'install:npm:@acme/theme@2.0.0',
+		]);
+	});
+
+	it('does not install a replacement when removing the old Git source fails', async () => {
+		const calls: string[] = [];
+		const packageManager = {
+			install: async (source: string): Promise<void> => {
+				calls.push(`install:${source}`);
+			},
+			remove: async (source: string): Promise<void> => {
+				calls.push(`remove:${source}`);
+				throw new Error('failed');
+			},
+		};
+		const operation = {
+			action: 'replace' as const,
+			previousSource: 'git:git@github.com:acme/plugin@v1',
+			source: 'https://github.com/acme/plugin@v2',
+		};
+
+		await expect(applyPackageOperations(packageManager, [operation])).resolves.toEqual({
+			failed: [operation],
+			failureMessage: 'One or more Pi package operations failed. Resolve them manually.',
+			succeeded: [],
+		});
+		expect(calls).toEqual(['remove:git:git@github.com:acme/plugin@v1']);
+	});
+
 	it('continues independent operations and retains exactly failed operations', async () => {
 		const calls: string[] = [];
 		const packageManager = {

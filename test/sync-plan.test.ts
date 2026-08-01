@@ -240,6 +240,27 @@ describe('pull planning', () => {
 		).rejects.toThrow('Managed paths collide with remote local destinations');
 	});
 
+	it('repairs auth.json permissions when special permission bits are present', async () => {
+		if (process.platform === 'win32') {
+			return;
+		}
+		const root = await createTemporaryDirectory('pi-sync-webdav-plan-');
+		temporaryDirectories.push(root);
+		await writeFile(join(root, 'auth.json'), 'private', 'utf8');
+		await chmod(join(root, 'auth.json'), 0o4600);
+
+		await expect(
+			planPull({
+				agentRoot: root,
+				connectionFingerprint: 'a'.repeat(64),
+				manifest: manifest([{ contents: 'private', path: 'auth.json' }]),
+				syncState: undefined,
+			}),
+		).resolves.toMatchObject({
+			actions: [expect.objectContaining({ action: 'secure', path: 'auth.json' })],
+		});
+	});
+
 	it('rejects oversized existing manifest and managed-deletion targets before reading them', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-plan-');
 		temporaryDirectories.push(root);
@@ -273,36 +294,9 @@ describe('pull planning', () => {
 		).rejects.toThrow('Local sync target exceeds the size limit');
 	});
 
-	it('rejects colliding native destinations and unsafe local target types', async () => {
+	it('rejects unsafe local target types', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-plan-');
 		temporaryDirectories.push(root);
-		const collisionManifest = manifest([
-			{ contents: 'one', path: 'Themes/one.json' },
-			{ contents: 'two', path: 'themes/one.json' },
-		]);
-
-		await expect(
-			planPull({
-				agentRoot: root,
-				connectionFingerprint: 'a'.repeat(64),
-				manifest: collisionManifest,
-				syncState: undefined,
-			}),
-		).rejects.toThrow('Remote manifest contains colliding local paths');
-
-		await expect(
-			planPull({
-				agentRoot: root,
-				caseInsensitiveDestination: true,
-				connectionFingerprint: 'a'.repeat(64),
-				manifest: manifest([
-					{ contents: 'file', path: 'themes' },
-					{ contents: 'intermediate', path: 'themes-dark' },
-					{ contents: 'child', path: 'Themes/dark.json' },
-				]),
-				syncState: undefined,
-			}),
-		).rejects.toThrow('Remote manifest contains colliding local paths');
 
 		await writeFile(join(root, 'themes'), 'not a directory', 'utf8');
 		await expect(

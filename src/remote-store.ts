@@ -31,8 +31,6 @@ export interface RemoteOperationOptions extends OperationOptions {
 	readonly onRetry?: WebDavRequestOptions['onRetry'];
 }
 
-export type RemoteOperationProgress = OperationProgress;
-
 export interface RemoteResidueCandidate {
 	readonly kind: 'probe' | 'revision';
 	readonly path: SafeRelativePath;
@@ -126,6 +124,27 @@ function sha256(bytes: Buffer): string {
 	return createHash('sha256').update(bytes).digest('hex');
 }
 
+function assertRevisionFileIntegrity(
+	file: Pick<ManifestFile, 'sha256' | 'size'>,
+	contents: Buffer,
+): void {
+	if (contents.byteLength !== file.size || sha256(contents) !== file.sha256) {
+		throw new Error('Remote revision file failed integrity verification');
+	}
+}
+
+function isExpectedManifest(
+	snapshot: RawManifestSnapshot | undefined,
+	expectedBytes: Buffer,
+	expectedSha256: string,
+): boolean {
+	return (
+		snapshot !== undefined &&
+		snapshot.sha256 === expectedSha256 &&
+		snapshot.bytes.equals(expectedBytes)
+	);
+}
+
 function requestOptions(options: RemoteOperationOptions | undefined): WebDavRequestOptions {
 	return {
 		...(options?.onRetry === undefined ? {} : { onRetry: options.onRetry }),
@@ -142,7 +161,7 @@ function cleanupOptions(options: RemoteOperationOptions | undefined): RemoteOper
 
 function reportProgress(
 	options: RemoteOperationOptions | undefined,
-	progress: RemoteOperationProgress,
+	progress: OperationProgress,
 ): void {
 	options?.onProgress?.(progress);
 }
@@ -287,9 +306,7 @@ export class RemoteStore {
 			undefined,
 			requestOptions(options),
 		);
-		if (contents.byteLength !== expected.size || sha256(contents) !== expected.sha256) {
-			throw new Error('Remote revision file failed integrity verification');
-		}
+		assertRevisionFileIntegrity(expected, contents);
 		return contents;
 	}
 
@@ -374,6 +391,8 @@ export class RemoteStore {
 			revision,
 			version: 1,
 		});
+		const manifestBytes = Buffer.from(serializeManifest(manifest), 'utf8');
+		const manifestSha256 = sha256(manifestBytes);
 		const revisionPath = this.#revisionPath(revision);
 		let manifestWriteStarted = false;
 		let manifestWriteCompleted = false;
@@ -388,12 +407,23 @@ export class RemoteStore {
 					total: input.files.length,
 				});
 				throwIfCancelled(options);
+				const remoteFile = remoteChild(revisionPath, file.path);
 				await this.#gateway.writeFile(
-					remoteChild(revisionPath, file.path),
+					remoteFile,
 					file.contents,
 					undefined,
 					requestOptions(options),
 				);
+				const uploadedContents = await this.#gateway.readFile(
+					remoteFile,
+					undefined,
+					requestOptions(options),
+				);
+				const expectedFile = manifest.files[index];
+				if (expectedFile === undefined) {
+					throw new Error('Missing revision file metadata');
+				}
+				assertRevisionFileIntegrity(expectedFile, uploadedContents);
 			}
 
 			const beforeCommit = await this.readRawManifest(options);
@@ -404,13 +434,13 @@ export class RemoteStore {
 			manifestWriteStarted = true;
 			await this.#gateway.writeFile(
 				this.#manifestPath(),
-				Buffer.from(serializeManifest(manifest), 'utf8'),
+				manifestBytes,
 				undefined,
 				requestOptions(options),
 			);
 			manifestWriteCompleted = true;
-			const committedManifest = await this.readManifest(options);
-			if (committedManifest?.manifest.revision !== revision) {
+			const committedManifest = await this.readRawManifest(options);
+			if (!isExpectedManifest(committedManifest, manifestBytes, manifestSha256)) {
 				throw new RemoteCommitRejectedError();
 			}
 
@@ -423,8 +453,8 @@ export class RemoteStore {
 			const cleanup = cleanupOptions(options);
 			if (manifestWriteStarted) {
 				try {
-					const committedManifest = await this.readManifest(cleanup);
-					if (committedManifest?.manifest.revision === revision) {
+					const committedManifest = await this.readRawManifest(cleanup);
+					if (isExpectedManifest(committedManifest, manifestBytes, manifestSha256)) {
 						const previousRevisionCleanup =
 							previousManifest === undefined || previousManifest.revision === revision
 								? 'not-applicable'
@@ -472,7 +502,10 @@ export class RemoteStore {
 		let unknownCount = 0;
 		for (const entry of rootEntries) {
 			throwIfCancelled(options);
-			if (entry.basename === MANIFEST_FILE_NAME || entry.basename === REVISIONS_DIRECTORY_NAME) {
+			if (
+				(entry.basename === MANIFEST_FILE_NAME && entry.type === 'file') ||
+				(entry.basename === REVISIONS_DIRECTORY_NAME && entry.type === 'directory')
+			) {
 				continue;
 			}
 			if (entry.type === 'directory' && PROBE_DIRECTORY_NAME_PATTERN.test(entry.basename)) {
@@ -502,7 +535,7 @@ export class RemoteStore {
 						kind: 'revision',
 						path: parseManifestPath(`${REVISIONS_DIRECTORY_NAME}/${entry.basename}`),
 					});
-				} else if (entry.basename !== activeRevision) {
+				} else if (entry.basename !== activeRevision || entry.type !== 'directory') {
 					unknownCount += 1;
 				}
 			}

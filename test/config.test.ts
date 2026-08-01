@@ -124,6 +124,32 @@ describe('private configuration', () => {
 		).rejects.toThrow('Invalid plugin configuration');
 	});
 
+	it('rejects colliding push includes and managed paths', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
+		temporaryDirectories.push(root);
+		const config = createConfig();
+
+		await expect(
+			writeConfig(root, {
+				...config,
+				pushInclude: [parsePushInclude('Themes'), parsePushInclude('themes')],
+			}),
+		).rejects.toThrow('Invalid plugin configuration');
+		await expect(
+			writeConfig(root, {
+				...config,
+				syncState: {
+					...config.syncState,
+					managedPaths: [
+						parseManifestPath('themes'),
+						parseManifestPath('themes-dark'),
+						parseManifestPath('Themes/dark.json'),
+					],
+				},
+			}),
+		).rejects.toThrow('Invalid plugin configuration');
+	});
+
 	it('validates before replacing an existing configuration', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
 		temporaryDirectories.push(root);

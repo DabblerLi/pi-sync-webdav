@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { parseManifestPath, type SafeRelativePath } from './paths.js';
+import { assertNoPathCollisions, parseManifestPath, type SafeRelativePath } from './paths.js';
 
 export const MANIFEST_VERSION = 1 as const;
 export const MAX_FILE_BYTES = 50 * 1024 * 1024;
@@ -98,13 +98,10 @@ export function validateManifest(value: unknown): ManifestV1 {
 	}
 
 	const files = value.files.map(parseManifestFile);
-	const sortedPaths = files.map((file) => file.path).sort();
-	if (
-		new Set(sortedPaths).size !== sortedPaths.length ||
-		sortedPaths.some((path, index) => index > 0 && path.startsWith(`${sortedPaths[index - 1]}/`))
-	) {
-		invalidManifest();
-	}
+	assertNoPathCollisions(
+		files.map((file) => file.path),
+		'Invalid manifest',
+	);
 
 	const totalBytes = files.reduce((total, file) => total + file.size, 0);
 	if (totalBytes > MAX_OPERATION_BYTES) {

@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import {
+	assertNoPathCollisions,
 	getPrivatePaths,
 	normalizeConnection,
 	parseManifestPath,
@@ -106,9 +107,7 @@ function parseUniquePaths(
 	}
 
 	const paths = value.map(parser);
-	if (new Set(paths).size !== paths.length) {
-		invalidConfig();
-	}
+	assertNoPathCollisions(paths, 'Invalid plugin configuration');
 	return paths;
 }
 
@@ -291,7 +290,6 @@ export async function writeConfig(agentRoot: string, config: PluginConfig): Prom
 		await assertConfigFileIsSafe(configFile);
 		await fs.rename(temporaryFile, configFile);
 		renamed = true;
-		await fs.chmod(configFile, 0o600);
 	} finally {
 		if (!renamed) {
 			await fs.rm(temporaryFile, { force: true });

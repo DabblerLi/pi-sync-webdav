@@ -10,7 +10,12 @@ import {
 	type ManifestV1,
 } from './manifest.js';
 import { throwIfOperationCancelled, type OperationOptions } from './operation.js';
-import { assertSafeLocalTarget, parseManifestPath, type SafeRelativePath } from './paths.js';
+import {
+	assertNoPathCollisions,
+	assertSafeLocalTarget,
+	parseManifestPath,
+	type SafeRelativePath,
+} from './paths.js';
 import type { RemoteManifestSnapshot } from './remote-store.js';
 import type { CollectedLocalFile, LocalSelection } from './selection.js';
 import { readRegularFileSnapshot } from './safe-files.js';
@@ -99,39 +104,12 @@ function localDestinationKey(path: SafeRelativePath, caseInsensitiveDestination:
 	return caseInsensitiveDestination ? path.toLocaleLowerCase('en-US') : path;
 }
 
-interface DestinationPathNode {
-	readonly children: Map<string, DestinationPathNode>;
-	terminal: boolean;
-}
-
-function destinationPathNode(): DestinationPathNode {
-	return { children: new Map(), terminal: false };
-}
-
 function assertNoLocalDestinationCollisions(
 	paths: readonly SafeRelativePath[],
 	caseInsensitiveDestination: boolean,
 	errorMessage = 'Remote manifest contains colliding local paths',
 ): void {
-	const root = destinationPathNode();
-	for (const path of paths) {
-		let node = root;
-		for (const component of localDestinationKey(path, caseInsensitiveDestination).split('/')) {
-			if (node.terminal) {
-				throw new Error(errorMessage);
-			}
-			let child = node.children.get(component);
-			if (child === undefined) {
-				child = destinationPathNode();
-				node.children.set(component, child);
-			}
-			node = child;
-		}
-		if (node.terminal || node.children.size > 0) {
-			throw new Error(errorMessage);
-		}
-		node.terminal = true;
-	}
+	assertNoPathCollisions(paths, errorMessage, caseInsensitiveDestination);
 }
 
 async function observeLocalFile(
@@ -324,7 +302,7 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 		}
 		if (
 			file.path === 'auth.json' &&
-			(process.platform === 'win32' || (local.mode & 0o777) !== 0o600)
+			(process.platform === 'win32' || (local.mode & 0o7777) !== 0o600)
 		) {
 			actions.push({
 				action: 'secure',

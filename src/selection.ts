@@ -132,6 +132,7 @@ async function getCandidateType(path: string): Promise<'directory' | 'file' | 'm
 
 export async function listSelectionCandidates(
 	agentRoot: string,
+	selectedPaths: readonly SafeRelativePath[] = [],
 	operation?: OperationOptions,
 ): Promise<readonly SelectionCandidate[]> {
 	const root = assertSafeAgentRoot(agentRoot);
@@ -158,6 +159,17 @@ export async function listSelectionCandidates(
 			path: sessionsPath,
 			type: sessionsType,
 		});
+	}
+	for (const rawPath of selectedPaths) {
+		throwIfOperationCancelled(operation?.signal);
+		const path = parsePushInclude(rawPath);
+		if (candidates.has(path)) {
+			continue;
+		}
+		const type = await getCandidateType(join(root, path));
+		if (type !== 'skip') {
+			candidates.set(path, { defaultSelected: false, path, type });
+		}
 	}
 
 	let entries;

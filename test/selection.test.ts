@@ -69,6 +69,20 @@ describe('selection candidates', () => {
 		expect([...byPath.keys()].map(String)).not.toContain('pi-sync-webdav');
 		expect([...byPath.keys()].map(String)).not.toContain('linked');
 	});
+
+	it('keeps a selected custom path available when the local entry is temporarily missing', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-selection-');
+		temporaryDirectories.push(root);
+		const selectedPath = parsePushInclude('custom.txt');
+
+		const candidates = await listSelectionCandidates(root, [selectedPath]);
+
+		expect(candidates).toContainEqual({
+			defaultSelected: false,
+			path: selectedPath,
+			type: 'missing',
+		});
+	});
 });
 
 describe('local selection collection', () => {

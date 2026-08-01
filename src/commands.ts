@@ -5,7 +5,12 @@ import {
 } from '@earendil-works/pi-coding-agent';
 
 import { connectionFingerprint, readConfig, writeConfig, type PluginConfig } from './config.js';
-import { applyRestorePlan, listBackups, planRestore } from './local-transaction.js';
+import {
+	applyRestorePlan,
+	listBackups,
+	planRestore,
+	type ApplyResult,
+} from './local-transaction.js';
 import { parseRemotePath, normalizeConnection, type NormalizedConnection } from './paths.js';
 import type { OperationOptions, OperationProgress } from './operation.js';
 import {
@@ -21,6 +26,7 @@ import {
 } from './selection.js';
 import {
 	applyStagedPull,
+	completeUnchangedPull,
 	preparePull,
 	preparePush,
 	publishPreparedPush,
@@ -82,6 +88,20 @@ function userVisibleError(error: unknown): string {
 		: 'The sync operation failed';
 }
 
+function applyFailureMessage(
+	operation: 'Pull' | 'Restore',
+	result: Exclude<ApplyResult, { readonly status: 'applied' }>,
+): string {
+	const failure = `${operation} failed: ${result.failureMessage}`;
+	if (result.status === 'rolled-back') {
+		return `${failure}. Earlier local changes were rolled back.`;
+	}
+	if (result.status === 'rollback-failed') {
+		return `${failure}. Local rollback did not complete.`;
+	}
+	return failure;
+}
+
 function isMutatingCommand(command: SyncWebdavSubcommand): boolean {
 	return (
 		command === 'dashboard' ||
@@ -137,9 +157,10 @@ async function confirmOptionalPaths(
 async function loadSelectionCandidates(
 	ctx: ExtensionCommandContext,
 	agentRoot: string,
+	selectedPaths: PluginConfig['pushInclude'] = [],
 ): Promise<Awaited<ReturnType<typeof listSelectionCandidates>> | undefined> {
 	const result = await runCommandOperation(ctx, { phase: 'preparing' }, (operation) =>
-		listSelectionCandidates(agentRoot, operation),
+		listSelectionCandidates(agentRoot, selectedPaths, operation),
 	);
 	if (result.cancelled || result.value === undefined) {
 		ctx.ui.notify('Push selection cancelled.', 'info');
@@ -309,7 +330,7 @@ async function runSettings(ctx: ExtensionCommandContext, agentRoot: string): Pro
 			continue;
 		}
 
-		const candidates = await loadSelectionCandidates(ctx, agentRoot);
+		const candidates = await loadSelectionCandidates(ctx, agentRoot, config.pushInclude);
 		if (candidates === undefined) {
 			continue;
 		}
@@ -408,7 +429,10 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 		return;
 	}
 	const preparation = prepared.value;
-	if (preparation.plan.actions.length === 0) {
+	if (
+		preparation.plan.actions.length === 0 &&
+		!preparation.requiresUnverifiedManifestConfirmation
+	) {
 		ctx.ui.notify('No changes to push.', 'info');
 		return;
 	}
@@ -423,6 +447,7 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 		return;
 	}
 	if (
+		preparation.plan.actions.length > 0 &&
 		!(await confirmSyncPlan(ctx, 'Push these changes to WebDAV?', {
 			files: preparation.plan.actions,
 			warnings: [
@@ -503,6 +528,7 @@ async function runPull(ctx: ExtensionCommandContext, agentRoot: string): Promise
 	}
 	const preparation = prepared.value;
 	if (preparation.plan.actions.length === 0 && preparation.packageOperations.length === 0) {
+		await completeUnchangedPull(agentRoot, preparation);
 		ctx.ui.notify('No changes to pull.', 'info');
 		return;
 	}
@@ -538,7 +564,7 @@ async function runPull(ctx: ExtensionCommandContext, agentRoot: string): Promise
 		ctx.ui.notify(
 			pulled.cancelled
 				? 'Pull cancelled before local changes completed.'
-				: 'Local changes were not applied.',
+				: applyFailureMessage('Pull', result.files),
 			'error',
 		);
 		return;
@@ -593,7 +619,7 @@ async function runRestore(ctx: ExtensionCommandContext, agentRoot: string): Prom
 		ctx.ui.notify(
 			restored.cancelled
 				? 'Restore cancelled before local changes completed.'
-				: 'Local backups were not restored.',
+				: applyFailureMessage('Restore', restored.value),
 			'error',
 		);
 		return;

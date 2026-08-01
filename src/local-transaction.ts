@@ -33,19 +33,22 @@ export interface RestorePlan {
 	readonly actions: readonly RestoreMutation[];
 }
 
-export interface ApplyResult {
-	readonly status: 'applied' | 'failed' | 'rolled-back' | 'rollback-failed';
-}
+export type ApplyResult =
+	| { readonly status: 'applied' }
+	| {
+			readonly failureMessage: string;
+			readonly status: 'failed' | 'rolled-back' | 'rollback-failed';
+	  };
 
 interface ActiveSnapshot {
 	readonly contents: Buffer;
+	readonly mode: number;
 	readonly path: SafeRelativePath;
 	readonly sha256: string;
 	readonly size: number;
 }
 
 interface AppliedMutation {
-	readonly action: 'add' | 'delete' | 'update';
 	readonly path: SafeRelativePath;
 	readonly previous: ActiveSnapshot | undefined;
 }
@@ -70,6 +73,12 @@ function isMissingPath(error: unknown): error is NodeJS.ErrnoException {
 
 function sha256(contents: Buffer): string {
 	return createHash('sha256').update(contents).digest('hex');
+}
+
+function safeFailureMessage(error: unknown): string {
+	return error instanceof Error && error.message.trim().length > 0
+		? error.message
+		: 'Local file operation failed';
 }
 
 function comparePaths(left: SafeRelativePath, right: SafeRelativePath): number {
@@ -218,7 +227,11 @@ async function assertSafeRegularOrMissing(path: string, errorMessage: string): P
 async function writeAtomically(
 	target: string,
 	contents: Buffer,
-	options: { readonly mode: number; readonly requireAbsent: boolean },
+	options: {
+		readonly enforceMode: boolean;
+		readonly mode: number;
+		readonly requireAbsent: boolean;
+	},
 ): Promise<void> {
 	const parent = join(target, '..');
 	const originalParent = await assertDirectory(parent, 'Unsafe local target');
@@ -231,7 +244,9 @@ async function writeAtomically(
 	let renamed = false;
 	try {
 		await fs.writeFile(temporaryPath, contents, { flag: 'wx', mode: options.mode });
-		await fs.chmod(temporaryPath, options.mode);
+		if (options.enforceMode) {
+			await fs.chmod(temporaryPath, options.mode);
+		}
 		const currentParent = await assertDirectory(parent, 'Unsafe local target');
 		if (currentParent.dev !== originalParent.dev || currentParent.ino !== originalParent.ino) {
 			throw new Error('Unsafe local target');
@@ -291,7 +306,13 @@ async function observeActiveSnapshot(
 	if (contents === undefined) {
 		throw new Error('Local target changed');
 	}
-	return { contents, path, sha256: sha256(contents), size: contents.byteLength };
+	return {
+		contents,
+		mode: initialEntry.mode & 0o7777,
+		path,
+		sha256: sha256(contents),
+		size: contents.byteLength,
+	};
 }
 
 async function readActiveSnapshot(
@@ -327,7 +348,11 @@ async function writePersistentBackup(agentRoot: string, snapshot: ActiveSnapshot
 		'Unsafe backup directory',
 	);
 	const target = join(parent, snapshot.path.split('/').at(-1) ?? '');
-	await writeAtomically(target, snapshot.contents, { mode: 0o600, requireAbsent: false });
+	await writeAtomically(target, snapshot.contents, {
+		enforceMode: true,
+		mode: 0o600,
+		requireAbsent: false,
+	});
 	const backupContents = await readRegularFileSnapshot(target, {
 		errorMessage: 'Unsafe backup file',
 		maxBytes: MAX_FILE_BYTES,
@@ -450,16 +475,20 @@ async function writeActiveFile(
 	path: SafeRelativePath,
 	contents: Buffer,
 	requireAbsent: boolean,
+	previousMode: number | undefined,
 ): Promise<void> {
 	const root = assertSafeAgentRoot(agentRoot);
 	const target = toAbsolutePath(root, path);
 	const parentSegments = path.split('/').slice(0, -1);
 	await ensureSafeDirectories(root, parentSegments, 0o755, 'Unsafe local target');
+	const authFile = path === 'auth.json';
+	const mode = authFile ? 0o600 : (previousMode ?? 0o666);
 	await writeAtomically(target, contents, {
-		mode: path === 'auth.json' ? 0o600 : 0o666,
+		enforceMode: authFile || (previousMode !== undefined && process.platform !== 'win32'),
+		mode,
 		requireAbsent,
 	});
-	if (path === 'auth.json') {
+	if (authFile) {
 		try {
 			await fs.chmod(target, 0o600);
 		} catch {
@@ -503,7 +532,13 @@ async function rollbackMutations(
 					await fs.unlink(target);
 				}
 			} else {
-				await writeActiveFile(agentRoot, mutation.path, mutation.previous.contents, false);
+				await writeActiveFile(
+					agentRoot,
+					mutation.path,
+					mutation.previous.contents,
+					false,
+					mutation.previous.mode,
+				);
 			}
 		} catch {
 			complete = false;
@@ -547,7 +582,11 @@ export async function stageVerifiedFile(
 		'Unsafe pull workspace',
 	);
 	const target = join(parent, path.split('/').at(-1) ?? '');
-	await writeAtomically(target, contents, { mode: 0o600, requireAbsent: true });
+	await writeAtomically(target, contents, {
+		enforceMode: true,
+		mode: 0o600,
+		requireAbsent: true,
+	});
 	const stagedContents = await readRegularFileSnapshot(target, {
 		errorMessage: 'Unsafe staged file',
 		maxBytes: MAX_FILE_BYTES,
@@ -621,7 +660,7 @@ export async function applyPullPlan(
 				await readActiveSnapshot(agentRoot, mutation.path, mutation.expectedLocal);
 				throwIfOperationCancelled(operation?.signal);
 				await deleteActiveFile(agentRoot, mutation.path);
-				mutations.push({ action: 'delete', path: mutation.path, previous });
+				mutations.push({ path: mutation.path, previous });
 				continue;
 			}
 			if (mutation.source === undefined || mutation.source.path !== mutation.path) {
@@ -636,21 +675,29 @@ export async function applyPullPlan(
 			await readActiveSnapshot(agentRoot, mutation.path, mutation.expectedLocal);
 			throwIfOperationCancelled(operation?.signal);
 			try {
-				await writeActiveFile(agentRoot, mutation.path, contents, previous === undefined);
-				mutations.push({ action: mutation.action, path: mutation.path, previous });
+				await writeActiveFile(
+					agentRoot,
+					mutation.path,
+					contents,
+					previous === undefined,
+					previous?.mode,
+				);
+				mutations.push({ path: mutation.path, previous });
 			} catch (error: unknown) {
 				if (error instanceof ActiveWriteError && error.replaced) {
-					mutations.push({ action: mutation.action, path: mutation.path, previous });
+					mutations.push({ path: mutation.path, previous });
 				}
 				throw error;
 			}
 		}
 		return { status: 'applied' };
-	} catch {
+	} catch (error: unknown) {
+		const failureMessage = safeFailureMessage(error);
 		if (mutations.length === 0) {
-			return { status: 'failed' };
+			return { failureMessage, status: 'failed' };
 		}
 		return {
+			failureMessage,
 			status: (await rollbackMutations(agentRoot, mutations)) ? 'rolled-back' : 'rollback-failed',
 		};
 	}
@@ -777,21 +824,29 @@ export async function applyRestorePlan(
 			await readActiveSnapshot(agentRoot, action.path, action.expectedLocal);
 			throwIfOperationCancelled(operation?.signal);
 			try {
-				await writeActiveFile(agentRoot, action.path, backupContents, previous === undefined);
-				mutations.push({ action: action.action, path: action.path, previous });
+				await writeActiveFile(
+					agentRoot,
+					action.path,
+					backupContents,
+					previous === undefined,
+					previous?.mode,
+				);
+				mutations.push({ path: action.path, previous });
 			} catch (error: unknown) {
 				if (error instanceof ActiveWriteError && error.replaced) {
-					mutations.push({ action: action.action, path: action.path, previous });
+					mutations.push({ path: action.path, previous });
 				}
 				throw error;
 			}
 		}
 		return { status: 'applied' };
-	} catch {
+	} catch (error: unknown) {
+		const failureMessage = safeFailureMessage(error);
 		if (mutations.length === 0) {
-			return { status: 'failed' };
+			return { failureMessage, status: 'failed' };
 		}
 		return {
+			failureMessage,
 			status: (await rollbackMutations(agentRoot, mutations)) ? 'rolled-back' : 'rollback-failed',
 		};
 	}

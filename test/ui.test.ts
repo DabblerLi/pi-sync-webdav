@@ -102,9 +102,43 @@ describe('confirmSyncPlan', () => {
 		});
 		await confirmSyncPlan(ctx, 'Push these changes to WebDAV?', { files });
 		const text = rendered.join('\n');
-		expect(text).toContain('ADD file-11.json');
-		expect(text).not.toContain('ADD file-12.json');
+		expect(text).toContain('ADD file-4.json');
+		expect(text).not.toContain('ADD file-5.json');
+		expect(text).toContain('… and 15 more');
+	});
+
+	it('limits mixed file and package operations while keeping warnings and choices visible', async () => {
+		const files = Array.from({ length: 10 }, (_, index) => ({
+			action: 'add' as const,
+			path: parseManifestPath(`file-${index}.json`),
+		}));
+		const packages = Array.from({ length: 10 }, (_, index) => ({
+			action: 'install' as const,
+			source: `npm:package-${index}`,
+		}));
+		let rendered: string[] = [];
+		const ctx = createContext((component, done) => {
+			rendered = component.render(80);
+			done(false as never);
+		});
+
+		await confirmSyncPlan(ctx, 'Apply these changes from WebDAV?', {
+			files,
+			packages,
+			warnings: ['Package code will run with your user permissions.'],
+		});
+
+		const text = rendered.join('\n');
+		expect(text).toContain('ADD file-2.json');
+		expect(text).not.toContain('ADD file-3.json');
+		expect(text).toContain('… and 7 more');
+		expect(text).toContain('INSTALL npm:package-1');
+		expect(text).not.toContain('INSTALL npm:package-2');
 		expect(text).toContain('… and 8 more');
+		expect(text).toContain('Package code will run with your user permissions.');
+		expect(text).toContain('→ Yes');
+		expect(text).toContain('No');
+		expect(rendered.length).toBeLessThanOrEqual(24);
 	});
 
 	it('shows short plans in full', async () => {
@@ -284,5 +318,23 @@ describe('runCancellableOperation', () => {
 		);
 
 		expect(result).toEqual({ cancelled: false, value: 'done' });
+	});
+
+	it('preserves an undefined rejection reason as a failed operation', async () => {
+		let rejected = false;
+		let reason: unknown = 'not rejected';
+		try {
+			await runCancellableOperation(
+				createContext(() => undefined),
+				{ phase: 'preparing' },
+				() => Promise.reject(undefined),
+			);
+		} catch (error: unknown) {
+			rejected = true;
+			reason = error;
+		}
+
+		expect(rejected).toBe(true);
+		expect(reason).toBeUndefined();
 	});
 });

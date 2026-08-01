@@ -30,6 +30,12 @@ export class MockWebDavServer {
 		status: number;
 	}> = [];
 	readonly #server: Server;
+	readonly #stalledBodies: Array<{
+		contents: Buffer;
+		method: string;
+		path: string;
+		remaining: number;
+	}> = [];
 	readonly requests: ReceivedRequest[] = [];
 	baseUrl = '';
 
@@ -69,6 +75,15 @@ export class MockWebDavServer {
 
 	delayNext(method: string, path: string, delayMs: number, count = 1): void {
 		this.#delays.push({ delayMs, method, path: normalizePath(path), remaining: count });
+	}
+
+	stallNextBody(method: string, path: string, contents: Buffer, count = 1): void {
+		this.#stalledBodies.push({
+			contents,
+			method,
+			path: normalizePath(path),
+			remaining: count,
+		});
 	}
 
 	setFile(path: string, contents: Buffer): void {
@@ -111,6 +126,16 @@ export class MockWebDavServer {
 		if (delay !== undefined) {
 			delay.remaining -= 1;
 			await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delay.delayMs));
+		}
+		const stalledBody = this.#stalledBodies.find(
+			(candidate) =>
+				candidate.method === method && candidate.path === path && candidate.remaining > 0,
+		);
+		if (stalledBody !== undefined) {
+			stalledBody.remaining -= 1;
+			response.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+			response.write(stalledBody.contents);
+			return;
 		}
 
 		switch (method) {

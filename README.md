@@ -53,7 +53,7 @@ Change the selection under **settings**. Directories sync recursively. The selec
 
 Never synced: `npm/`, `git/`, `pi-sync-webdav/`, `logs/`, `node_modules/`.
 
-`sessions/` and `auth.json` are off by default. Adding one to the selection asks for an extra confirmation the first time; after that it stays approved. Treat everything you select—especially `auth.json`—as sensitive and only sync to a remote you trust.
+`sessions/` and `auth.json` are off by default. Adding one to the selection asks for an extra confirmation. Treat everything you select—especially `auth.json`—as sensitive and only sync to a remote you trust.
 
 ## How sync works
 

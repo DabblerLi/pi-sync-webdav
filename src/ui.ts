@@ -243,6 +243,7 @@ export async function runCancellableOperation<T>(
 	if (ctx.mode !== 'tui') {
 		return { cancelled: true, value: undefined };
 	}
+	let didFail = false;
 	let failure: unknown;
 	const result = await ctx.ui.custom<CancellableOperationResult<T>>(
 		(tui, theme, keybindings, done) => {
@@ -271,6 +272,7 @@ export async function runCancellableOperation<T>(
 				(value) => finish({ cancelled: loader.aborted, value }),
 				(error: unknown) => {
 					if (!loader.aborted || !isOperationCancelled(error)) {
+						didFail = true;
 						failure = error;
 					}
 					finish({ cancelled: loader.aborted, value: undefined });
@@ -298,7 +300,7 @@ export async function runCancellableOperation<T>(
 			};
 		},
 	);
-	if (failure !== undefined) {
+	if (didFail) {
 		throw failure;
 	}
 	return result;
@@ -314,7 +316,7 @@ export function formatPlanLines(
 		readonly packages?: readonly PackageOperation[];
 		readonly warnings?: readonly string[];
 	},
-	options?: { maxFiles?: number },
+	options?: { maxFiles?: number; maxPackages?: number },
 ): readonly string[] {
 	const lines: string[] = [];
 	if (input.files.length > 0) {
@@ -333,8 +335,15 @@ export function formatPlanLines(
 			lines.push('');
 		}
 		lines.push('Packages:');
-		for (const operation of input.packages) {
+		const visible =
+			options?.maxPackages === undefined
+				? input.packages
+				: input.packages.slice(0, options.maxPackages);
+		for (const operation of visible) {
 			lines.push(`  ${operation.action.toUpperCase()} ${operation.source}`);
+		}
+		if (visible.length < input.packages.length) {
+			lines.push(`  … and ${input.packages.length - visible.length} more`);
 		}
 	}
 	if (input.warnings !== undefined && input.warnings.length > 0) {
@@ -349,7 +358,28 @@ export function formatPlanLines(
 	return lines;
 }
 
-const MAX_PLAN_FILES = 12;
+const MAX_VISIBLE_PLAN_OPERATIONS = 5;
+
+function planDisplayLimits(input: Parameters<typeof formatPlanLines>[0]): {
+	readonly maxFiles: number;
+	readonly maxPackages: number;
+} {
+	const packageCount = input.packages?.length ?? 0;
+	if (input.files.length === 0) {
+		return { maxFiles: 0, maxPackages: MAX_VISIBLE_PLAN_OPERATIONS };
+	}
+	if (packageCount === 0) {
+		return { maxFiles: MAX_VISIBLE_PLAN_OPERATIONS, maxPackages: 0 };
+	}
+
+	let maxFiles = Math.min(input.files.length, Math.ceil(MAX_VISIBLE_PLAN_OPERATIONS / 2));
+	let maxPackages = Math.min(packageCount, MAX_VISIBLE_PLAN_OPERATIONS - maxFiles);
+	let remaining = MAX_VISIBLE_PLAN_OPERATIONS - maxFiles - maxPackages;
+	maxFiles += Math.min(remaining, input.files.length - maxFiles);
+	remaining = MAX_VISIBLE_PLAN_OPERATIONS - maxFiles - maxPackages;
+	maxPackages += Math.min(remaining, packageCount - maxPackages);
+	return { maxFiles, maxPackages };
+}
 
 export async function confirmSyncPlan(
 	ctx: ExtensionCommandContext,
@@ -359,7 +389,7 @@ export async function confirmSyncPlan(
 	if (ctx.mode !== 'tui') {
 		return false;
 	}
-	const lines = formatPlanLines(input, { maxFiles: MAX_PLAN_FILES });
+	const lines = formatPlanLines(input, planDisplayLimits(input));
 	return confirmDialog(ctx, title, lines.length === 0 ? 'No changes.' : lines.join('\n'));
 }
 

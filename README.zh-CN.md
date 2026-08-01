@@ -53,7 +53,7 @@ pi update --extensions
 
 永远不会同步：`npm/`、`git/`、`pi-sync-webdav/`、`logs/`、`node_modules/`。
 
-`sessions/` 和 `auth.json` 默认不选中。首次将它们加入选择范围时需要额外确认，之后保持已批准状态。请把你选中的所有内容——尤其是 `auth.json`——当作敏感数据，只同步到你信任的远端。
+`sessions/` 和 `auth.json` 默认不选中。将它们加入选择范围时需要额外确认。请把你选中的所有内容——尤其是 `auth.json`——当作敏感数据，只同步到你信任的远端。
 
 ## 变更如何流转
 

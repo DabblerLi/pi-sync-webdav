@@ -96,6 +96,30 @@ describe('WebDAV gateway', () => {
 		});
 	});
 
+	it('cancels and times out reads after a response body has started', async () => {
+		const { gateway, server } = await createGateway();
+		const file = parseRemotePath('pi-sync-webdav/stalled.txt');
+		server.stallNextBody('GET', file, Buffer.from('partial', 'utf8'));
+		const controller = new AbortController();
+		const cancelled = gateway.readFile(file, () => controller.abort(), controller.signal);
+
+		await expect(cancelled).rejects.toMatchObject({ message: 'WebDAV request cancelled' });
+
+		server.stallNextBody('GET', file, Buffer.from('partial', 'utf8'));
+		const timeoutGateway = createWebDavGateway(
+			normalizeConnection({
+				password: 'password',
+				remotePath: 'pi-sync-webdav',
+				url: server.baseUrl,
+				username: 'alice',
+			}),
+			{ requestTimeoutMs: 10, retryDelaysMs: [] },
+		);
+		await expect(timeoutGateway.readFile(file)).rejects.toMatchObject({
+			message: 'WebDAV request timed out',
+		});
+	});
+
 	it('reports retry state and cancels before another retry begins', async () => {
 		const { gateway, server } = await createGateway();
 		const root = parseRemotePath('pi-sync-webdav');
@@ -186,6 +210,12 @@ describe('WebDAV gateway', () => {
 		);
 
 		await expect(limitedGateway.readFile(file)).rejects.toThrow(
+			'WebDAV response exceeds the size limit',
+		);
+		await expect(limitedGateway.directoryContents(root)).rejects.toThrow(
+			'WebDAV response exceeds the size limit',
+		);
+		await expect(limitedGateway.exists(root)).rejects.toThrow(
 			'WebDAV response exceeds the size limit',
 		);
 		server.failNext(

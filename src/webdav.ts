@@ -1,9 +1,21 @@
 import { Readable } from 'node:stream';
+import { TextDecoder } from 'node:util';
 
-import { createClient, type FileStat, type WebDAVClient } from 'webdav';
+import {
+	createClient,
+	parseXML,
+	prepareFileFromProps,
+	type FileStat,
+	type WebDAVClient,
+} from 'webdav';
 
 import { MAX_FILE_BYTES } from './manifest.js';
-import { parseRemotePath, type NormalizedConnection, type RemotePath } from './paths.js';
+import {
+	encodeRemotePath,
+	parseRemotePath,
+	type NormalizedConnection,
+	type RemotePath,
+} from './paths.js';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_RETRY_DELAYS_MS = [250, 500] as const;
@@ -118,9 +130,17 @@ async function readStreamWithLimit(
 	stream: Readable,
 	maxResponseBytes: number,
 	onProgress: ((progress: TransferProgress) => void) | undefined,
+	signal: AbortSignal | undefined,
 ): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	let loaded = 0;
+	const abort = (): void => {
+		stream.destroy(new Error('WebDAV response stream aborted'));
+	};
+	if (signal?.aborted) {
+		abort();
+	}
+	signal?.addEventListener('abort', abort, { once: true });
 
 	try {
 		for await (const chunk of stream) {
@@ -140,9 +160,36 @@ async function readStreamWithLimit(
 			throw error;
 		}
 		throw toSafeRequestError(error);
+	} finally {
+		signal?.removeEventListener('abort', abort);
 	}
 
 	return Buffer.concat(chunks);
+}
+
+function responsePath(href: string, baseUrl: string): string {
+	try {
+		return new URL(href, baseUrl).pathname.replace(/\/+$/u, '');
+	} catch {
+		throw new WebDavRequestError('WebDAV response contains an invalid path', { retryable: false });
+	}
+}
+
+function isRequestedResource(href: string, path: RemotePath, baseUrl: string): boolean {
+	const requested = responsePath(encodeRemotePath(path), baseUrl);
+	return responsePath(href, baseUrl) === requested;
+}
+
+function responseBasename(href: string, baseUrl: string): string {
+	const name = responsePath(href, baseUrl).split('/').at(-1);
+	if (name === undefined || name.length === 0) {
+		throw new WebDavRequestError('WebDAV response contains an invalid path', { retryable: false });
+	}
+	try {
+		return decodeURIComponent(name);
+	} catch {
+		throw new WebDavRequestError('WebDAV response contains an invalid path', { retryable: false });
+	}
 }
 
 function normalizeRequestOptions(
@@ -183,12 +230,14 @@ async function waitForRetryDelay(delay: number, signal: AbortSignal | undefined)
 }
 
 class SafeWebDavGateway implements WebDavGateway {
+	readonly #baseUrl: string;
 	readonly #client: WebDAVClient;
 	readonly #maxResponseBytes: number;
 	readonly #requestTimeoutMs: number;
 	readonly #retryDelaysMs: readonly number[];
 
 	constructor(connection: NormalizedConnection, options: WebDavGatewayOptions) {
+		this.#baseUrl = connection.url;
 		this.#client = createClient(connection.url, {
 			password: connection.password,
 			username: connection.username,
@@ -224,19 +273,78 @@ class SafeWebDavGateway implements WebDavGateway {
 		options?: WebDavRequestOptions,
 	): Promise<readonly RemoteDirectoryEntry[]> {
 		const remotePath = parseRemotePath(path);
-		const contents = await this.#execute(
-			(signal) => this.#client.getDirectoryContents(remotePath, { signal }),
-			normalizeRequestOptions(options),
-		);
-		return contents.map(toRemoteDirectoryEntry);
+		const bytes = await this.#execute(async (signal) => {
+			const response = await this.#client.customRequest(remotePath, {
+				method: 'PROPFIND',
+				headers: {
+					Accept: 'text/plain,application/xml',
+					Depth: '1',
+				},
+				signal,
+			});
+			if (response.body === null) {
+				throw new WebDavRequestError('WebDAV response has no body', { retryable: false });
+			}
+			return readStreamWithLimit(
+				response.body as unknown as Readable,
+				this.#maxResponseBytes,
+				undefined,
+				signal,
+			);
+		}, normalizeRequestOptions(options));
+		let parsed;
+		try {
+			parsed = await parseXML(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+		} catch {
+			throw new WebDavRequestError('WebDAV directory response is invalid', { retryable: false });
+		}
+		return parsed.multistatus.response
+			.filter((entry) => !isRequestedResource(entry.href, remotePath, this.#baseUrl))
+			.map((entry) => {
+				if (entry.propstat === undefined) {
+					throw new WebDavRequestError('WebDAV directory response is invalid', {
+						retryable: false,
+					});
+				}
+				const filename = entry.propstat.prop.displayname;
+				return toRemoteDirectoryEntry(
+					prepareFileFromProps(
+						entry.propstat.prop,
+						typeof filename === 'string' ? filename : responseBasename(entry.href, this.#baseUrl),
+					),
+				);
+			});
 	}
 
 	async exists(path: RemotePath, options?: WebDavRequestOptions): Promise<boolean> {
 		const remotePath = parseRemotePath(path);
-		return this.#execute(
-			(signal) => this.#client.exists(remotePath, { signal }),
-			normalizeRequestOptions(options),
-		);
+		try {
+			await this.#execute(async (signal) => {
+				const response = await this.#client.customRequest(remotePath, {
+					method: 'PROPFIND',
+					headers: {
+						Accept: 'text/plain,application/xml',
+						Depth: '0',
+					},
+					signal,
+				});
+				if (response.body === null) {
+					throw new WebDavRequestError('WebDAV response has no body', { retryable: false });
+				}
+				await readStreamWithLimit(
+					response.body as unknown as Readable,
+					this.#maxResponseBytes,
+					undefined,
+					signal,
+				);
+			}, normalizeRequestOptions(options));
+			return true;
+		} catch (error: unknown) {
+			if (error instanceof WebDavRequestError && error.status === 404) {
+				return false;
+			}
+			throw error;
+		}
 	}
 
 	async readFile(
@@ -247,7 +355,7 @@ class SafeWebDavGateway implements WebDavGateway {
 		const remotePath = parseRemotePath(path);
 		return this.#execute(async (signal) => {
 			const stream = this.#client.createReadStream(remotePath, { signal });
-			return readStreamWithLimit(stream, this.#maxResponseBytes, onProgress);
+			return readStreamWithLimit(stream, this.#maxResponseBytes, onProgress, signal);
 		}, normalizeRequestOptions(options));
 	}
 

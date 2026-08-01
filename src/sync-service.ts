@@ -270,6 +270,19 @@ export async function preparePull(
 	};
 }
 
+export async function completeUnchangedPull(
+	agentRoot: string,
+	preparation: PullPreparation,
+): Promise<void> {
+	if (preparation.plan.actions.length > 0 || preparation.packageOperations.length > 0) {
+		throw new Error('Pull contains pending changes');
+	}
+	await writeConfig(
+		agentRoot,
+		configWithSyncState(preparation.config, preparation.plan.nextManagedPaths),
+	);
+}
+
 export async function stagePreparedPull(
 	agentRoot: string,
 	preparation: PullPreparation,
@@ -351,6 +364,9 @@ export async function applyStagedPull(
 		);
 		if (packages.cancelled || operation?.signal?.aborted) {
 			return { cancelled: true, files, packages };
+		}
+		if (packages.failed.length > 0) {
+			return { files, packages };
 		}
 		await writeConfig(
 			agentRoot,

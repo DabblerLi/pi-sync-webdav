@@ -124,12 +124,15 @@ describe('safe relative paths', () => {
 			'themes/CON.json',
 			'themes/NUL',
 			'themes/COM1',
+			'themes/COM\u00b9',
+			'themes/LPT\u00b3.txt',
 			'themes/Lpt9.txt',
 			'themes/CLOCK$',
 			'themes/trailing-dot.',
 			'themes/trailing-space ',
 			'themes/wildcard?.json',
 			'themes/pipe|name.json',
+			'themes/bad\ud800.json',
 		]) {
 			expect(() => parseManifestPath(path)).toThrow();
 		}
@@ -154,6 +157,7 @@ describe('safe relative paths', () => {
 		const path = parseRemotePath('themes/a b%#?.json');
 
 		expect(encodeRemotePath(path)).toBe('themes/a%20b%25%23%3F.json');
+		expect(() => parseRemotePath('themes/bad\ud800.json')).toThrow('Invalid remote path');
 	});
 
 	it('resolves targets beneath the configured agent root', async () => {

@@ -1,4 +1,6 @@
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from '@earendil-works/pi-coding-agent';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { getKeybindings, type KeybindingsManager } from '@earendil-works/pi-tui';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -35,6 +37,11 @@ type CustomStep =
 	| { readonly type: 'cancel' }
 	| { readonly type: 'complete' }
 	| {
+			readonly run: () => Promise<void>;
+			readonly type: 'effect';
+			readonly value: unknown;
+	  }
+	| {
 			readonly type: 'inspect';
 			readonly onRender: (lines: string[]) => void;
 			readonly value: unknown;
@@ -62,6 +69,9 @@ function createCustomDriver(steps: readonly CustomStep[]) {
 		}
 		if (step.type === 'value') {
 			return Promise.resolve(step.value);
+		}
+		if (step.type === 'effect') {
+			return step.run().then(() => step.value);
 		}
 		return new Promise((resolve) => {
 			const component = factory(
@@ -717,6 +727,216 @@ describe('sync command registration', () => {
 		expect(notify).toHaveBeenCalledWith('Push selection saved.', 'info');
 	});
 
+	it('persists sync state when pull finds the local files already current', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'sync-root',
+			url: server.baseUrl,
+			username: 'alice',
+		});
+		const config = {
+			connection: { ...connection, readOnly: false },
+			pushInclude: [parsePushInclude('settings.json')],
+			version: 1 as const,
+		};
+		await writeFile(join(root, 'settings.json'), '{}', 'utf8');
+		await writeConfig(root, config);
+		const store = new RemoteStore(
+			createWebDavGateway(connection),
+			parseRemotePath(connection.remotePath),
+		);
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [{ contents: Buffer.from('{}'), path: parseManifestPath('settings.json') }],
+		});
+		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
+		registerSyncWebdavCommands(
+			{
+				registerCommand: vi.fn(
+					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
+						registered = options;
+					},
+				),
+			} as unknown as ExtensionAPI,
+			() => root,
+		);
+		const driver = createCustomDriver([{ type: 'complete' }]);
+		const notify = vi.fn();
+
+		await registered?.handler('pull', {
+			mode: 'tui',
+			ui: { custom: driver.custom, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(driver.calls()).toBe(1);
+		expect(await readConfig(root)).toMatchObject({
+			syncState: {
+				connectionFingerprint: connectionFingerprint(connection),
+				managedPaths: [parseManifestPath('settings.json')],
+			},
+		});
+		expect(notify).toHaveBeenCalledWith('No changes to pull.', 'info');
+	});
+
+	it('risk-confirms and publishes an empty revision over an invalid manifest', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'sync-root',
+			url: server.baseUrl,
+			username: 'alice',
+		});
+		await writeConfig(root, {
+			connection: { ...connection, readOnly: false },
+			pushInclude: [],
+			version: 1,
+		});
+		const gateway = createWebDavGateway(connection);
+		const store = new RemoteStore(gateway, parseRemotePath(connection.remotePath));
+		await store.ensureRoot();
+		await gateway.writeFile(parseRemotePath('sync-root/manifest.json'), Buffer.from('{', 'utf8'));
+		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
+		registerSyncWebdavCommands(
+			{
+				registerCommand: vi.fn(
+					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
+						registered = options;
+					},
+				),
+			} as unknown as ExtensionAPI,
+			() => root,
+		);
+		const driver = createCustomDriver([
+			{ type: 'complete' },
+			valueStep(true),
+			{ type: 'complete' },
+		]);
+		const notify = vi.fn();
+
+		await registered?.handler('push', {
+			mode: 'tui',
+			ui: { custom: driver.custom, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(driver.calls()).toBe(3);
+		expect((await store.readManifest())?.manifest.files).toEqual([]);
+		expect(await readConfig(root)).toMatchObject({
+			syncState: { managedPaths: [] },
+		});
+		expect(notify).toHaveBeenCalledWith('Configuration pushed.', 'info');
+	});
+
+	it('reports the pull failure reason and completed rollback', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'sync-root',
+			url: server.baseUrl,
+			username: 'alice',
+		});
+		await writeFile(join(root, 'a.json'), 'old a', 'utf8');
+		await writeFile(join(root, 'b.json'), 'old b', 'utf8');
+		await writeConfig(root, {
+			connection: { ...connection, readOnly: false },
+			pushInclude: [],
+			version: 1,
+		});
+		const store = new RemoteStore(
+			createWebDavGateway(connection),
+			parseRemotePath(connection.remotePath),
+		);
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('new a'), path: parseManifestPath('a.json') },
+				{ contents: Buffer.from('new b'), path: parseManifestPath('b.json') },
+			],
+		});
+		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
+		registerSyncWebdavCommands(
+			{
+				registerCommand: vi.fn(
+					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
+						registered = options;
+					},
+				),
+			} as unknown as ExtensionAPI,
+			() => root,
+		);
+		const driver = createCustomDriver([
+			{ type: 'complete' },
+			{
+				run: () => writeFile(join(root, 'b.json'), 'changed after planning', 'utf8'),
+				type: 'effect',
+				value: true,
+			},
+			{ type: 'complete' },
+		]);
+		const notify = vi.fn();
+
+		await registered?.handler('pull', {
+			mode: 'tui',
+			ui: { custom: driver.custom, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(notify).toHaveBeenCalledWith(
+			'Pull failed: Local target changed. Earlier local changes were rolled back.',
+			'error',
+		);
+		expect(await readFile(join(root, 'a.json'), 'utf8')).toBe('old a');
+		expect(await readFile(join(root, 'b.json'), 'utf8')).toBe('changed after planning');
+	});
+
+	it('reports the restore failure reason', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const backupsDirectory = join(root, 'pi-sync-webdav', 'backups');
+		await mkdir(backupsDirectory, { mode: 0o700, recursive: true });
+		await writeFile(join(backupsDirectory, 'settings.json'), 'backup', 'utf8');
+		await writeFile(join(root, 'settings.json'), 'current', 'utf8');
+		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
+		registerSyncWebdavCommands(
+			{
+				registerCommand: vi.fn(
+					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
+						registered = options;
+					},
+				),
+			} as unknown as ExtensionAPI,
+			() => root,
+		);
+		const driver = createCustomDriver([
+			{ type: 'complete' },
+			{
+				run: () => writeFile(join(root, 'settings.json'), 'changed after planning', 'utf8'),
+				type: 'effect',
+				value: true,
+			},
+			{ type: 'complete' },
+		]);
+		const notify = vi.fn();
+
+		await registered?.handler('restore', {
+			mode: 'tui',
+			ui: { custom: driver.custom, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(notify).toHaveBeenCalledWith('Restore failed: Local target changed', 'error');
+		expect(await readFile(join(root, 'settings.json'), 'utf8')).toBe('changed after planning');
+	});
+
 	it('cleans only verified remote residue from the dashboard after confirmation', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
 		temporaryDirectories.push(root);
@@ -870,6 +1090,54 @@ describe('sync command registration', () => {
 
 		expect(driver.calls()).toBe(5);
 		expect(await readConfig(root)).toMatchObject({ pushInclude });
+	});
+
+	it('asks again after a sensitive path is removed and later re-added', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'sync-root',
+			url: 'https://example.com/dav',
+			username: 'alice',
+		});
+		const sessions = parsePushInclude('sessions');
+		const settings = parsePushInclude('settings.json');
+		await writeConfig(root, {
+			connection: { ...connection, readOnly: true },
+			pushInclude: [settings, sessions],
+			version: 1,
+		});
+		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
+		registerSyncWebdavCommands(
+			{
+				registerCommand: vi.fn(
+					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
+						registered = options;
+					},
+				),
+			} as unknown as ExtensionAPI,
+			() => root,
+		);
+		const driver = createCustomDriver([
+			valueStep('Settings'),
+			valueStep('Push selection'),
+			{ type: 'complete' },
+			valueStep([settings]),
+			valueStep('Push selection'),
+			{ type: 'complete' },
+			valueStep([settings, sessions]),
+			valueStep(true),
+			valueStep('Cancel'),
+		]);
+
+		await registered?.handler('', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input: vi.fn(), notify: vi.fn() },
+		} as unknown as ExtensionCommandContext);
+
+		expect(driver.calls()).toBe(9);
+		expect(await readConfig(root)).toMatchObject({ pushInclude: [settings, sessions] });
 	});
 
 	it('persists read-only capability by hiding push from the dashboard and rejecting it directly', async () => {

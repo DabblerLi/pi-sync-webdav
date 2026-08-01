@@ -54,11 +54,11 @@ export async function promptSecret(
 
 		return {
 			handleInput: (data: string) => {
-				if (matchesKey(data, Key.escape)) {
+				if (keybindings.matches(data, 'tui.select.cancel')) {
 					finish(undefined);
 					return;
 				}
-				if (matchesKey(data, Key.enter)) {
+				if (keybindings.matches(data, 'tui.select.confirm')) {
 					finish(characters.join(''));
 					return;
 				}

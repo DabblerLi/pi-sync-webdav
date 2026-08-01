@@ -54,7 +54,7 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 
 - Validate URLs, remote paths, manifest entries, and local targets before I/O. A remote path may have one input trailing slash but is persisted without it. Reject unsafe paths: traversal, special files, absolute/Windows paths, device names, alternate data streams, trailing dots/spaces, symlinks, and case-insensitive collisions.
 - `npm/`, `git/`, and the plugin private directory are never synced. `logs/` and `node_modules/` are also excluded at every depth.
-- `sessions/` and `auth.json` are opt-in. The extra confirmation appears only when such a path is added to the push selection for the first time; once saved, later edits and sync operations do not ask again. `auth.json` is restored with mode `0600`.
+- `sessions/` and `auth.json` are opt-in. The extra confirmation appears when such a path is added to the push selection and is remembered while it remains selected; removing it and adding it again requires confirmation again. `auth.json` is restored with mode `0600`.
 - Selected text files receive local secret-pattern warnings. Secrets, credentials, file contents, and Authorization headers are never rendered or logged.
 - HTTPS is required by default; HTTP requires explicit confirmation. Invalid or self-signed TLS certificates are rejected. A connection must prove read access before it can be saved; a failed write probe produces an explicitly read-only connection.
 - Limits: 50 MiB per file and 500 MiB per operation.

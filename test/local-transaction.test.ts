@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -64,6 +65,17 @@ async function stageManifest(
 	}
 	await sealPullWorkspace(root, workspace, manifest);
 	return workspace;
+}
+
+async function writeBackups(
+	root: string,
+	files: ReadonlyArray<{ contents: string; path: string }>,
+): Promise<void> {
+	const backupsDirectory = join(root, 'pi-sync-webdav', 'backups');
+	await mkdir(backupsDirectory, { mode: 0o700, recursive: true });
+	for (const file of files) {
+		await writeFile(join(backupsDirectory, file.path), file.contents, 'utf8');
+	}
 }
 
 afterEach(async () => {
@@ -344,6 +356,59 @@ describe('pull transaction', () => {
 		await disposePullWorkspace(root, workspace);
 	});
 
+	it('matches Pi permissions for added, updated, and restored regular files', async () => {
+		if (process.platform === 'win32') {
+			return;
+		}
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		const existingPath = join(root, 'settings.json');
+		const addedPath = join(root, 'added.json');
+		await writeFile(existingPath, 'old settings', 'utf8');
+		await chmod(existingPath, 0o640);
+		const manifest = createManifest([
+			{ contents: 'new settings', path: 'settings.json' },
+			{ contents: 'added', path: 'added.json' },
+		]);
+		const workspace = await stageManifest(
+			root,
+			manifest,
+			new Map([
+				['settings.json', 'new settings'],
+				['added.json', 'added'],
+			]),
+		);
+		const plan: PullPlan = {
+			actions: [
+				{
+					action: 'update',
+					expectedLocal: expected('old settings'),
+					path: parseManifestPath('settings.json'),
+					source: source(manifest, 'settings.json'),
+				},
+				{
+					action: 'add',
+					expectedLocal: { kind: 'absent' },
+					path: parseManifestPath('added.json'),
+					source: source(manifest, 'added.json'),
+				},
+			],
+			downloads: manifest.files,
+			nextManagedPaths: manifest.files.map((file) => file.path),
+		};
+
+		await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({ status: 'applied' });
+		expect((await stat(existingPath)).mode & 0o777).toBe(0o640);
+		expect((await stat(addedPath)).mode & 0o777).toBe(0o666 & ~process.umask());
+
+		await chmod(existingPath, 0o600);
+		const restorePlan = await planRestore(root, await listBackups(root));
+		await expect(applyRestorePlan(root, restorePlan)).resolves.toEqual({ status: 'applied' });
+		expect(await readFile(existingPath, 'utf8')).toBe('old settings');
+		expect((await stat(existingPath)).mode & 0o777).toBe(0o600);
+		await disposePullWorkspace(root, workspace);
+	});
+
 	it('rejects a workspace changed after sealing before mutating active files', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
 		temporaryDirectories.push(root);
@@ -382,7 +447,11 @@ describe('pull transaction', () => {
 	it('rolls back earlier mutations when a later target becomes unsafe', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
 		temporaryDirectories.push(root);
-		await writeFile(join(root, 'settings.json'), 'old settings', 'utf8');
+		const settingsPath = join(root, 'settings.json');
+		await writeFile(settingsPath, 'old settings', 'utf8');
+		if (process.platform !== 'win32') {
+			await chmod(settingsPath, 0o600);
+		}
 		await writeFile(join(root, 'blocked'), 'not a directory', 'utf8');
 		const manifest = createManifest([
 			{ contents: 'new settings', path: 'settings.json' },
@@ -415,8 +484,63 @@ describe('pull transaction', () => {
 			nextManagedPaths: manifest.files.map((file) => file.path),
 		};
 
-		await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({ status: 'rolled-back' });
-		expect(await readFile(join(root, 'settings.json'), 'utf8')).toBe('old settings');
+		await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({
+			failureMessage: 'Unsafe local target',
+			status: 'rolled-back',
+		});
+		expect(await readFile(settingsPath, 'utf8')).toBe('old settings');
+		if (process.platform !== 'win32') {
+			expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
+		}
+	});
+
+	it('keeps the pull failure reason when rollback cannot complete', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		await writeFile(join(root, 'a.json'), 'old a', 'utf8');
+		await writeFile(join(root, 'b.json'), 'old b', 'utf8');
+		const manifest = createManifest([
+			{ contents: 'new a', path: 'a.json' },
+			{ contents: 'new b', path: 'b.json' },
+		]);
+		const workspace = await stageManifest(
+			root,
+			manifest,
+			new Map([
+				['a.json', 'new a'],
+				['b.json', 'new b'],
+			]),
+		);
+		const plan: PullPlan = {
+			actions: [
+				{
+					action: 'update',
+					expectedLocal: expected('old a'),
+					path: parseManifestPath('a.json'),
+					source: source(manifest, 'a.json'),
+				},
+				{
+					action: 'update',
+					expectedLocal: expected('old b'),
+					path: parseManifestPath('b.json'),
+					source: source(manifest, 'b.json'),
+				},
+			],
+			downloads: manifest.files,
+			nextManagedPaths: manifest.files.map((file) => file.path),
+		};
+
+		await expect(
+			applyPullPlan(root, workspace, plan, {
+				onProgress: (progress) => {
+					if (progress.phase === 'applying' && progress.completed === 2) {
+						unlinkSync(join(root, 'a.json'));
+						mkdirSync(join(root, 'a.json'));
+						writeFileSync(join(root, 'b.json'), 'changed b', 'utf8');
+					}
+				},
+			}),
+		).resolves.toEqual({ failureMessage: 'Local target changed', status: 'rollback-failed' });
 	});
 
 	it('does not start a pull mutation when cancellation is requested by progress reporting', async () => {
@@ -447,11 +571,46 @@ describe('pull transaction', () => {
 				onProgress: () => controller.abort(),
 				signal: controller.signal,
 			}),
-		).resolves.toEqual({ status: 'failed' });
+		).resolves.toEqual({ failureMessage: 'Sync operation cancelled', status: 'failed' });
 		await expect(readFile(join(root, 'settings.json'), 'utf8')).rejects.toMatchObject({
 			code: 'ENOENT',
 		});
 		await disposePullWorkspace(root, workspace);
+	});
+
+	it('reports a restore failure when a local target changes after planning', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		await writeFile(join(root, 'settings.json'), 'current', 'utf8');
+		await writeBackups(root, [{ contents: 'backup', path: 'settings.json' }]);
+		const plan = await planRestore(root, await listBackups(root));
+		await writeFile(join(root, 'settings.json'), 'changed after planning', 'utf8');
+
+		await expect(applyRestorePlan(root, plan)).resolves.toEqual({
+			failureMessage: 'Local target changed',
+			status: 'failed',
+		});
+		expect(await readFile(join(root, 'settings.json'), 'utf8')).toBe('changed after planning');
+	});
+
+	it('reports the restore failure reason after rolling back an earlier restore', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		await writeFile(join(root, 'a.json'), 'current a', 'utf8');
+		await writeFile(join(root, 'b.json'), 'current b', 'utf8');
+		await writeBackups(root, [
+			{ contents: 'backup a', path: 'a.json' },
+			{ contents: 'backup b', path: 'b.json' },
+		]);
+		const plan = await planRestore(root, await listBackups(root));
+		await writeFile(join(root, 'b.json'), 'changed b', 'utf8');
+
+		await expect(applyRestorePlan(root, plan)).resolves.toEqual({
+			failureMessage: 'Local target changed',
+			status: 'rolled-back',
+		});
+		expect(await readFile(join(root, 'a.json'), 'utf8')).toBe('current a');
+		expect(await readFile(join(root, 'b.json'), 'utf8')).toBe('changed b');
 	});
 
 	it('rejects invalid staged bytes and reports no backups before the first pull', async () => {

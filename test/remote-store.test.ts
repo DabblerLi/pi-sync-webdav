@@ -111,6 +111,97 @@ describe('remote store', () => {
 		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
 	});
 
+	it('rejects a truncated revision upload without deleting the active revision', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const first = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [{ contents: Buffer.from('first', 'utf8'), path: parseManifestPath('settings.json') }],
+		});
+		const firstSnapshot = await store.readManifest();
+		if (firstSnapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		const truncatingGateway: WebDavGateway = {
+			createDirectory: (path, options) => gateway.createDirectory(path, options),
+			deletePath: (path, options) => gateway.deletePath(path, options),
+			directoryContents: (path, options) => gateway.directoryContents(path, options),
+			exists: (path, options) => gateway.exists(path, options),
+			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
+			writeFile: (path, contents, onProgress, options) =>
+				gateway.writeFile(
+					path,
+					path.includes('/revisions/') ? contents.subarray(0, contents.byteLength - 1) : contents,
+					onProgress,
+					options,
+				),
+		};
+
+		await expect(
+			new RemoteStore(truncatingGateway, root).publishRevision({
+				allowUnverifiedManifest: false,
+				expectedManifestSha256: firstSnapshot.sha256,
+				files: [
+					{ contents: Buffer.from('second', 'utf8'), path: parseManifestPath('settings.json') },
+				],
+			}),
+		).rejects.toThrow('Remote revision file failed integrity verification');
+		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
+		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toEqual([
+			{ basename: first.manifest.revision, type: 'directory' },
+		]);
+	});
+
+	it('rejects a rewritten manifest with the expected revision without deleting the previous revision', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const first = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [{ contents: Buffer.from('first', 'utf8'), path: parseManifestPath('settings.json') }],
+		});
+		const firstSnapshot = await store.readManifest();
+		if (firstSnapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		const manifestPath = parseRemotePath(`${root}/manifest.json`);
+		const rewritingGateway: WebDavGateway = {
+			createDirectory: (path, options) => gateway.createDirectory(path, options),
+			deletePath: (path, options) => gateway.deletePath(path, options),
+			directoryContents: (path, options) => gateway.directoryContents(path, options),
+			exists: (path, options) => gateway.exists(path, options),
+			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
+			writeFile: async (path, contents, onProgress, options) => {
+				if (path !== manifestPath) {
+					await gateway.writeFile(path, contents, onProgress, options);
+					return;
+				}
+				const manifest = JSON.parse(contents.toString('utf8')) as Record<string, unknown>;
+				await gateway.writeFile(
+					path,
+					Buffer.from(JSON.stringify({ ...manifest, files: [] }), 'utf8'),
+					onProgress,
+					options,
+				);
+			},
+		};
+
+		await expect(
+			new RemoteStore(rewritingGateway, root).publishRevision({
+				allowUnverifiedManifest: false,
+				expectedManifestSha256: firstSnapshot.sha256,
+				files: [
+					{ contents: Buffer.from('second', 'utf8'), path: parseManifestPath('settings.json') },
+				],
+			}),
+		).rejects.toBeInstanceOf(RemoteCommitUnknownError);
+		expect(
+			await gateway.exists(parseRemotePath(`${root}/revisions/${first.manifest.revision}`)),
+		).toBe(true);
+		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toHaveLength(2);
+	});
+
 	it('downloads only manifest-declared revision files and verifies their integrity', async () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
@@ -359,6 +450,39 @@ describe('remote store', () => {
 			await gateway.exists(parseRemotePath(`${root}/revisions/${published.manifest.revision}`)),
 		).toBe(true);
 		expect(await gateway.exists(parseRemotePath(`${root}/legacy.txt`))).toBe(true);
+	});
+
+	it('counts reserved entries and the active revision as unknown when their types are wrong', async () => {
+		const wrongReserved = await createStore('wrong-reserved');
+		await wrongReserved.store.ensureRoot();
+		await wrongReserved.gateway.createDirectory(
+			parseRemotePath(`${wrongReserved.root}/manifest.json`),
+		);
+		await wrongReserved.gateway.writeFile(
+			parseRemotePath(`${wrongReserved.root}/revisions`),
+			Buffer.from('not a directory', 'utf8'),
+		);
+		expect(await wrongReserved.store.inspectResidue()).toEqual({ candidates: [], unknownCount: 2 });
+
+		const wrongActiveRevision = await createStore('wrong-active-revision');
+		await wrongActiveRevision.store.ensureRoot();
+		const published = await wrongActiveRevision.store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [],
+		});
+		const activeRevisionPath = parseRemotePath(
+			`${wrongActiveRevision.root}/revisions/${published.manifest.revision}`,
+		);
+		await wrongActiveRevision.gateway.deletePath(activeRevisionPath);
+		await wrongActiveRevision.gateway.writeFile(
+			activeRevisionPath,
+			Buffer.from('not a directory', 'utf8'),
+		);
+		expect(await wrongActiveRevision.store.inspectResidue()).toEqual({
+			candidates: [],
+			unknownCount: 1,
+		});
 	});
 
 	it('retains a revision that becomes active after residue inspection', async () => {

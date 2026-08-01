@@ -318,7 +318,7 @@ describe('sync service', () => {
 		});
 		expect(calls).toEqual(['install:npm:@scope/broken', 'install:npm:working']);
 		expect(await readFile(`${root}/themes/dark.txt`, 'utf8')).toBe('dark');
-		expect(await readConfig(root)).not.toHaveProperty('pendingPackageOperations');
+		expect((await readConfig(root))?.syncState).toBeUndefined();
 
 		const laterPreparation = await preparePull(
 			{ agentRoot: root, config: (await readConfig(root))!, store },
