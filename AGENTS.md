@@ -26,3 +26,4 @@ Read `docs/design.md` before changing implementation code. Treat the following a
 
 - Before reporting completion, run formatting, lint, typecheck, tests, package validation, and `git diff --check`.
 - Do not commit, publish, change versions, push tags, or alter release settings without explicit user approval. Review the diff before staging.
+- When committing multiple concerns, split them into focused commits so implementation, documentation, automation, and release metadata remain independently reviewable and revertible.
