@@ -36,6 +36,10 @@
 			"./src/index.ts"
 		]
 	},
+	"publishConfig": {
+		"access": "public",
+		"registry": "https://registry.npmjs.org"
+	},
 	"scripts": {
 		"format": "prettier --write AGENTS.md CONTRIBUTING.md README.md README.zh-CN.md docs/design.md .github/workflows src test package.json tsconfig.json eslint.config.mjs vitest.config.ts .prettierrc.json",
 		"format:check": "prettier --check AGENTS.md CONTRIBUTING.md README.md README.zh-CN.md docs/design.md .github/workflows src test package.json tsconfig.json eslint.config.mjs vitest.config.ts .prettierrc.json",
