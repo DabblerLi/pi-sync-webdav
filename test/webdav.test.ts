@@ -6,6 +6,15 @@ import { MockWebDavServer } from './mock-webdav-server.js';
 
 const servers: MockWebDavServer[] = [];
 
+function testConnection(server: MockWebDavServer, password = 'password') {
+	return normalizeConnection({
+		password,
+		remotePath: 'pi-sync-webdav',
+		url: server.baseUrl,
+		username: 'alice',
+	});
+}
+
 afterEach(async () => {
 	await Promise.all(servers.splice(0).map((server) => server.close()));
 });
@@ -13,15 +22,10 @@ afterEach(async () => {
 async function createGateway() {
 	const server = await MockWebDavServer.create();
 	servers.push(server);
-	const gateway = createWebDavGateway(
-		normalizeConnection({
-			password: 'password',
-			remotePath: 'pi-sync-webdav',
-			url: server.baseUrl,
-			username: 'alice',
-		}),
-		{ requestTimeoutMs: 1_000, retryDelaysMs: [0, 0] },
-	);
+	const gateway = createWebDavGateway(testConnection(server), {
+		requestTimeoutMs: 1_000,
+		retryDelaysMs: [0, 0],
+	});
 	return { gateway, server };
 }
 
@@ -63,15 +67,10 @@ describe('WebDAV gateway', () => {
 		const file = parseRemotePath('pi-sync-webdav/retry-timeout.txt');
 		await setupGateway.createDirectory(root);
 		await setupGateway.writeFile(file, Buffer.from('retry', 'utf8'));
-		const gateway = createWebDavGateway(
-			normalizeConnection({
-				password: 'password',
-				remotePath: 'pi-sync-webdav',
-				url: server.baseUrl,
-				username: 'alice',
-			}),
-			{ requestTimeoutMs: 10, retryDelaysMs: [0, 0] },
-		);
+		const gateway = createWebDavGateway(testConnection(server), {
+			requestTimeoutMs: 10,
+			retryDelaysMs: [0, 0],
+		});
 		server.failNext('GET', 'pi-sync-webdav/retry-timeout.txt', 429);
 		server.delayNext('GET', 'pi-sync-webdav/retry-timeout.txt', 50);
 
@@ -106,15 +105,10 @@ describe('WebDAV gateway', () => {
 		await expect(cancelled).rejects.toMatchObject({ message: 'WebDAV request cancelled' });
 
 		server.stallNextBody('GET', file, Buffer.from('partial', 'utf8'));
-		const timeoutGateway = createWebDavGateway(
-			normalizeConnection({
-				password: 'password',
-				remotePath: 'pi-sync-webdav',
-				url: server.baseUrl,
-				username: 'alice',
-			}),
-			{ requestTimeoutMs: 10, retryDelaysMs: [] },
-		);
+		const timeoutGateway = createWebDavGateway(testConnection(server), {
+			requestTimeoutMs: 10,
+			retryDelaysMs: [],
+		});
 		await expect(timeoutGateway.readFile(file)).rejects.toMatchObject({
 			message: 'WebDAV request timed out',
 		});
@@ -181,33 +175,14 @@ describe('WebDAV gateway', () => {
 		const file = parseRemotePath('pi-sync-webdav/large.txt');
 		await gateway.createDirectory(root);
 		await gateway.writeFile(file, Buffer.from('large', 'utf8'));
-		const limitedGateway = createWebDavGateway(
-			normalizeConnection({
-				password: 'password',
-				remotePath: 'pi-sync-webdav',
-				url: server.baseUrl,
-				username: 'alice',
-			}),
-			{ maxResponseBytes: 4, retryDelaysMs: [] },
-		);
-		const noRetryGateway = createWebDavGateway(
-			normalizeConnection({
-				password: 'password',
-				remotePath: 'pi-sync-webdav',
-				url: server.baseUrl,
-				username: 'alice',
-			}),
-			{ retryDelaysMs: [] },
-		);
-		const unauthorizedGateway = createWebDavGateway(
-			normalizeConnection({
-				password: 'wrong-password',
-				remotePath: 'pi-sync-webdav',
-				url: server.baseUrl,
-				username: 'alice',
-			}),
-			{ retryDelaysMs: [] },
-		);
+		const limitedGateway = createWebDavGateway(testConnection(server), {
+			maxResponseBytes: 4,
+			retryDelaysMs: [],
+		});
+		const noRetryGateway = createWebDavGateway(testConnection(server), { retryDelaysMs: [] });
+		const unauthorizedGateway = createWebDavGateway(testConnection(server, 'wrong-password'), {
+			retryDelaysMs: [],
+		});
 
 		await expect(limitedGateway.readFile(file)).rejects.toThrow(
 			'WebDAV response exceeds the size limit',

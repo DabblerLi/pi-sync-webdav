@@ -66,7 +66,8 @@ function parseConnection(value: unknown, allowDerivedFields: boolean): StoredCon
 	if (!isRecord(value)) {
 		invalidConfig();
 	}
-	const expectedKeys = Object.hasOwn(value, 'requiresInsecureTransportConfirmation')
+	const hasDerivedField = Object.hasOwn(value, 'requiresInsecureTransportConfirmation');
+	const expectedKeys = hasDerivedField
 		? [
 				'url',
 				'remotePath',
@@ -76,7 +77,7 @@ function parseConnection(value: unknown, allowDerivedFields: boolean): StoredCon
 				'requiresInsecureTransportConfirmation',
 			]
 		: ['url', 'remotePath', 'username', 'password', 'readOnly'];
-	if (!allowDerivedFields && expectedKeys.length !== 5) {
+	if (hasDerivedField && !allowDerivedFields) {
 		invalidConfig();
 	}
 	assertExactKeys(value, expectedKeys);
@@ -90,7 +91,7 @@ function parseConnection(value: unknown, allowDerivedFields: boolean): StoredCon
 		username: requireString(value.username),
 	});
 	if (
-		Object.hasOwn(value, 'requiresInsecureTransportConfirmation') &&
+		hasDerivedField &&
 		value.requiresInsecureTransportConfirmation !== connection.requiresInsecureTransportConfirmation
 	) {
 		invalidConfig();

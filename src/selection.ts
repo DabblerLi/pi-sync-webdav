@@ -85,28 +85,27 @@ async function assertAgentRootDirectory(agentRoot: string): Promise<void> {
 	}
 }
 
-function isTextLike(contents: Buffer): boolean {
+function decodeText(contents: Buffer): string | undefined {
 	if (contents.includes(0)) {
-		return false;
+		return undefined;
 	}
 	try {
-		new TextDecoder('utf-8', { fatal: true }).decode(contents);
-		return true;
+		return new TextDecoder('utf-8', { fatal: true }).decode(contents);
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
 function containsSecretPattern(contents: Buffer): boolean {
-	if (!isTextLike(contents)) {
-		return false;
-	}
-	const text = new TextDecoder('utf-8', { fatal: true }).decode(contents);
-	return SECRET_PATTERNS.some((pattern) => pattern.test(text));
+	const text = decodeText(contents);
+	return text !== undefined && SECRET_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 function comparePaths(left: SafeRelativePath, right: SafeRelativePath): number {
-	return left < right ? -1 : left > right ? 1 : 0;
+	if (left === right) {
+		return 0;
+	}
+	return left < right ? -1 : 1;
 }
 
 async function getCandidateType(path: string): Promise<'directory' | 'file' | 'missing' | 'skip'> {

@@ -177,14 +177,8 @@ function remoteChild(parent: RemotePath, child: string): RemotePath {
 }
 
 function decodeManifest(bytes: Buffer): ManifestV1 {
-	let json: string;
 	try {
-		json = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-	} catch {
-		throw new UnverifiedRemoteManifestError();
-	}
-	try {
-		return parseManifest(json);
+		return parseManifest(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
 	} catch {
 		throw new UnverifiedRemoteManifestError();
 	}
@@ -226,16 +220,10 @@ export class RemoteStore {
 		if (entries.some((entry) => entry.basename === MANIFEST_FILE_NAME && entry.type === 'file')) {
 			return { kind: 'managed' };
 		}
-		return {
-			kind:
-				entries.length === 0 ||
-				entries.every(
-					(entry) =>
-						entry.type === 'directory' && PROBE_DIRECTORY_NAME_PATTERN.test(entry.basename),
-				)
-					? 'empty'
-					: 'foreign',
-		};
+		const containsOnlyProbes = entries.every(
+			(entry) => entry.type === 'directory' && PROBE_DIRECTORY_NAME_PATTERN.test(entry.basename),
+		);
+		return { kind: containsOnlyProbes ? 'empty' : 'foreign' };
 	}
 
 	async ensureRoot(options?: RemoteOperationOptions): Promise<RemoteRootInspection> {
@@ -444,10 +432,11 @@ export class RemoteStore {
 				throw new RemoteCommitRejectedError();
 			}
 
-			const previousRevisionCleanup =
-				previousManifest === undefined || previousManifest.revision === revision
-					? 'not-applicable'
-					: await this.#cleanupPreviousRevision(previousManifest.revision, options);
+			const previousRevisionCleanup = await this.#cleanupPreviousRevision(
+				previousManifest,
+				revision,
+				options,
+			);
 			return { manifest, previousRevisionCleanup };
 		} catch (error: unknown) {
 			const cleanup = cleanupOptions(options);
@@ -455,10 +444,11 @@ export class RemoteStore {
 				try {
 					const committedManifest = await this.readRawManifest(cleanup);
 					if (isExpectedManifest(committedManifest, manifestBytes, manifestSha256)) {
-						const previousRevisionCleanup =
-							previousManifest === undefined || previousManifest.revision === revision
-								? 'not-applicable'
-								: await this.#cleanupPreviousRevision(previousManifest.revision, cleanup);
+						const previousRevisionCleanup = await this.#cleanupPreviousRevision(
+							previousManifest,
+							revision,
+							cleanup,
+						);
 						return { manifest, previousRevisionCleanup };
 					}
 				} catch {
@@ -541,7 +531,12 @@ export class RemoteStore {
 			}
 		}
 		return {
-			candidates: candidates.sort((left, right) => (left.path < right.path ? -1 : 1)),
+			candidates: candidates.sort((left, right) => {
+				if (left.path === right.path) {
+					return 0;
+				}
+				return left.path < right.path ? -1 : 1;
+			}),
 			unknownCount,
 		};
 	}
@@ -646,11 +641,18 @@ export class RemoteStore {
 	}
 
 	async #cleanupPreviousRevision(
-		revision: RevisionId,
+		previousManifest: ManifestV1 | undefined,
+		activeRevision: RevisionId,
 		options?: RemoteOperationOptions,
 	): Promise<PublishRevisionResult['previousRevisionCleanup']> {
+		if (previousManifest === undefined || previousManifest.revision === activeRevision) {
+			return 'not-applicable';
+		}
 		try {
-			return (await this.#deleteRevisionIfUnreferenced(revision, cleanupOptions(options)))
+			return (await this.#deleteRevisionIfUnreferenced(
+				previousManifest.revision,
+				cleanupOptions(options),
+			))
 				? 'deleted'
 				: 'retained';
 		} catch {

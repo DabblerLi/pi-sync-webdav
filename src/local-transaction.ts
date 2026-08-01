@@ -54,8 +54,6 @@ interface AppliedMutation {
 }
 
 class ActiveWriteError extends Error {
-	readonly replaced = true;
-
 	constructor() {
 		super('Unable to secure local file permissions after replacement');
 		this.name = 'ActiveWriteError';
@@ -82,7 +80,10 @@ function safeFailureMessage(error: unknown): string {
 }
 
 function comparePaths(left: SafeRelativePath, right: SafeRelativePath): number {
-	return left < right ? -1 : left > right ? 1 : 0;
+	if (left === right) {
+		return 0;
+	}
+	return left < right ? -1 : 1;
 }
 
 function assertWorkspaceId(workspace: PullWorkspace): void {
@@ -497,6 +498,24 @@ async function writeActiveFile(
 	}
 }
 
+async function writeAndRecordMutation(
+	agentRoot: string,
+	path: SafeRelativePath,
+	contents: Buffer,
+	previous: ActiveSnapshot | undefined,
+	mutations: AppliedMutation[],
+): Promise<void> {
+	try {
+		await writeActiveFile(agentRoot, path, contents, previous === undefined, previous?.mode);
+	} catch (error: unknown) {
+		if (error instanceof ActiveWriteError) {
+			mutations.push({ path, previous });
+		}
+		throw error;
+	}
+	mutations.push({ path, previous });
+}
+
 async function deleteActiveFile(agentRoot: string, path: SafeRelativePath): Promise<void> {
 	const root = assertSafeAgentRoot(agentRoot);
 	if (!(await inspectSafeDirectories(root, path.split('/').slice(0, -1), 'Unsafe local target'))) {
@@ -545,6 +564,21 @@ async function rollbackMutations(
 		}
 	}
 	return complete;
+}
+
+async function recoverFromApplyFailure(
+	agentRoot: string,
+	mutations: readonly AppliedMutation[],
+	error: unknown,
+): Promise<ApplyResult> {
+	const failureMessage = safeFailureMessage(error);
+	if (mutations.length === 0) {
+		return { failureMessage, status: 'failed' };
+	}
+	return {
+		failureMessage,
+		status: (await rollbackMutations(agentRoot, mutations)) ? 'rolled-back' : 'rollback-failed',
+	};
 }
 
 export async function createPullWorkspace(agentRoot: string): Promise<PullWorkspace> {
@@ -674,32 +708,11 @@ export async function applyPullPlan(
 			}
 			await readActiveSnapshot(agentRoot, mutation.path, mutation.expectedLocal);
 			throwIfOperationCancelled(operation?.signal);
-			try {
-				await writeActiveFile(
-					agentRoot,
-					mutation.path,
-					contents,
-					previous === undefined,
-					previous?.mode,
-				);
-				mutations.push({ path: mutation.path, previous });
-			} catch (error: unknown) {
-				if (error instanceof ActiveWriteError && error.replaced) {
-					mutations.push({ path: mutation.path, previous });
-				}
-				throw error;
-			}
+			await writeAndRecordMutation(agentRoot, mutation.path, contents, previous, mutations);
 		}
 		return { status: 'applied' };
 	} catch (error: unknown) {
-		const failureMessage = safeFailureMessage(error);
-		if (mutations.length === 0) {
-			return { failureMessage, status: 'failed' };
-		}
-		return {
-			failureMessage,
-			status: (await rollbackMutations(agentRoot, mutations)) ? 'rolled-back' : 'rollback-failed',
-		};
+		return recoverFromApplyFailure(agentRoot, mutations, error);
 	}
 }
 
@@ -823,31 +836,10 @@ export async function applyRestorePlan(
 			throwIfOperationCancelled(operation?.signal);
 			await readActiveSnapshot(agentRoot, action.path, action.expectedLocal);
 			throwIfOperationCancelled(operation?.signal);
-			try {
-				await writeActiveFile(
-					agentRoot,
-					action.path,
-					backupContents,
-					previous === undefined,
-					previous?.mode,
-				);
-				mutations.push({ path: action.path, previous });
-			} catch (error: unknown) {
-				if (error instanceof ActiveWriteError && error.replaced) {
-					mutations.push({ path: action.path, previous });
-				}
-				throw error;
-			}
+			await writeAndRecordMutation(agentRoot, action.path, backupContents, previous, mutations);
 		}
 		return { status: 'applied' };
 	} catch (error: unknown) {
-		const failureMessage = safeFailureMessage(error);
-		if (mutations.length === 0) {
-			return { failureMessage, status: 'failed' };
-		}
-		return {
-			failureMessage,
-			status: (await rollbackMutations(agentRoot, mutations)) ? 'rolled-back' : 'rollback-failed',
-		};
+		return recoverFromApplyFailure(agentRoot, mutations, error);
 	}
 }

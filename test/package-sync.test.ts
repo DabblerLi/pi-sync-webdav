@@ -14,6 +14,18 @@ import { createTemporaryDirectory, removeTemporaryDirectory } from './helpers.js
 
 const temporaryDirectories: string[] = [];
 
+async function expectInvalidSource(plan: Promise<unknown>, forbiddenText: string): Promise<void> {
+	const error = await plan.then(
+		() => {
+			throw new Error('Expected package source rejection');
+		},
+		(failure: unknown) => failure,
+	);
+	expect(error).toBeInstanceOf(Error);
+	expect((error as Error).message).toBe('Invalid Pi package source');
+	expect((error as Error).message).not.toContain(forbiddenText);
+}
+
 afterEach(async () => {
 	await Promise.all(temporaryDirectories.splice(0).map(removeTemporaryDirectory));
 });
@@ -146,11 +158,7 @@ describe('package synchronization planning', () => {
 			agentRoot: root,
 			before: [],
 		});
-		await expect(credentialedPlan).rejects.toThrow('Invalid Pi package source');
-		await credentialedPlan.catch((error: unknown) => {
-			expect(error).toBeInstanceOf(Error);
-			expect((error as Error).message).not.toContain('token');
-		});
+		await expectInvalidSource(credentialedPlan, 'token');
 		await expect(
 			planPackageSync({
 				after: ['ssh://token@example.com/acme/plugin@v1'],
@@ -167,11 +175,7 @@ describe('package synchronization planning', () => {
 				agentRoot: root,
 				before: [],
 			});
-			await expect(credentialedGitRefPlan).rejects.toThrow('Invalid Pi package source');
-			await credentialedGitRefPlan.catch((error: unknown) => {
-				expect(error).toBeInstanceOf(Error);
-				expect((error as Error).message).not.toContain('token');
-			});
+			await expectInvalidSource(credentialedGitRefPlan, 'token');
 		}
 		await expect(
 			planPackageSync({
@@ -185,11 +189,7 @@ describe('package synchronization planning', () => {
 			agentRoot: root,
 			before: [],
 		});
-		await expect(hostedQueryPlan).rejects.toThrow('Invalid Pi package source');
-		await hostedQueryPlan.catch((error: unknown) => {
-			expect(error).toBeInstanceOf(Error);
-			expect((error as Error).message).not.toContain('access_token');
-		});
+		await expectInvalidSource(hostedQueryPlan, 'access_token');
 		for (const source of [
 			'git:github:token@acme/plugin#v1',
 			'git:gitlab:acme%40token/plugin#v1',
@@ -200,11 +200,7 @@ describe('package synchronization planning', () => {
 			'git:github:acme/plugin#https%253A%252F%252Ftoken%2540example.com%252Fx',
 		]) {
 			const credentialedGitPlan = planPackageSync({ after: [source], agentRoot: root, before: [] });
-			await expect(credentialedGitPlan).rejects.toThrow('Invalid Pi package source');
-			await credentialedGitPlan.catch((error: unknown) => {
-				expect(error).toBeInstanceOf(Error);
-				expect((error as Error).message).not.toContain('token');
-			});
+			await expectInvalidSource(credentialedGitPlan, 'token');
 		}
 		await expect(
 			planPackageSync({
@@ -236,22 +232,14 @@ describe('package synchronization planning', () => {
 			'npm:example@git+ssh://token@example.com/acme/plugin',
 		]) {
 			const credentialedNpmPlan = planPackageSync({ after: [source], agentRoot: root, before: [] });
-			await expect(credentialedNpmPlan).rejects.toThrow('Invalid Pi package source');
-			await credentialedNpmPlan.catch((error: unknown) => {
-				expect(error).toBeInstanceOf(Error);
-				expect((error as Error).message).not.toContain('token');
-			});
+			await expectInvalidSource(credentialedNpmPlan, 'token');
 		}
 		const npmCredentialedPlan = planPackageSync({
 			after: ['npm:example@https://token@registry.example/package.tgz'],
 			agentRoot: root,
 			before: [],
 		});
-		await expect(npmCredentialedPlan).rejects.toThrow('Invalid Pi package source');
-		await npmCredentialedPlan.catch((error: unknown) => {
-			expect(error).toBeInstanceOf(Error);
-			expect((error as Error).message).not.toContain('token');
-		});
+		await expectInvalidSource(npmCredentialedPlan, 'token');
 		await expect(
 			planPackageSync({
 				after: ['git://example.com/acme/plugin@v1'],

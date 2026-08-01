@@ -55,6 +55,25 @@ type CustomFactory = (
 	done: (value: never) => void,
 ) => DrivenComponent;
 
+type RegisteredCommand = Parameters<ExtensionAPI['registerCommand']>[1];
+
+function registerTestCommand(agentRoot: string): {
+	readonly command: RegisteredCommand;
+	readonly pi: ExtensionAPI;
+} {
+	let command: RegisteredCommand | undefined;
+	const pi = {
+		registerCommand: vi.fn((_name: string, options: RegisteredCommand) => {
+			command = options;
+		}),
+	} as unknown as ExtensionAPI;
+	registerSyncWebdavCommands(pi, () => agentRoot);
+	if (command === undefined) {
+		throw new Error('Expected sync command registration');
+	}
+	return { command, pi };
+}
+
 function valueStep(value: unknown): CustomStep {
 	return { type: 'value', value };
 }
@@ -118,31 +137,23 @@ describe('sync command parsing', () => {
 
 describe('sync command registration', () => {
 	it('registers /sync-webdav with subcommand completion and blocks mutations outside TUI mode', async () => {
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		const pi = {
-			registerCommand: vi.fn(
-				(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-					registered = options;
-				},
-			),
-		} as unknown as ExtensionAPI;
-		registerSyncWebdavCommands(pi, () => '/not-used');
+		const { command: registered, pi } = registerTestCommand('/not-used');
 
 		expect(pi.registerCommand).toHaveBeenCalledWith('sync-webdav', expect.any(Object));
-		expect(registered?.getArgumentCompletions?.('p')).toEqual([
+		expect(registered.getArgumentCompletions?.('p')).toEqual([
 			{ label: 'push', value: 'push' },
 			{ label: 'pull', value: 'pull' },
 		]);
 		for (const command of ['settings', 'push', 'pull', 'restore']) {
 			const notify = vi.fn();
-			await registered?.handler(command, {
+			await registered.handler(command, {
 				mode: 'print',
 				ui: { notify },
 			} as unknown as ExtensionCommandContext);
 			expect(notify).toHaveBeenCalledWith('This action requires an interactive terminal.', 'error');
 		}
 		const statusNotify = vi.fn();
-		await registered?.handler('status', {
+		await registered.handler('status', {
 			mode: 'print',
 			ui: { notify: statusNotify },
 		} as unknown as ExtensionCommandContext);
@@ -157,15 +168,7 @@ describe('sync command registration', () => {
 		temporaryDirectories.push(root);
 		const server = await MockWebDavServer.create();
 		servers.push(server);
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		const pi = {
-			registerCommand: vi.fn(
-				(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-					registered = options;
-				},
-			),
-		} as unknown as ExtensionAPI;
-		registerSyncWebdavCommands(pi, () => root);
+		const { command: registered } = registerTestCommand(root);
 		const driver = createCustomDriver([
 			valueStep('password'),
 			valueStep(true),
@@ -174,7 +177,7 @@ describe('sync command registration', () => {
 			{ type: 'complete' },
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: {
 				custom: driver.custom,
@@ -200,17 +203,7 @@ describe('sync command registration', () => {
 		const server = await MockWebDavServer.create();
 		servers.push(server);
 		server.delayNext('PROPFIND', 'pi-sync-webdav', 50);
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
 		const driver = createCustomDriver([
 			valueStep('password'),
@@ -220,7 +213,7 @@ describe('sync command registration', () => {
 			{ type: 'cancel' },
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: {
 				custom: driver.custom,
@@ -253,15 +246,7 @@ describe('sync command registration', () => {
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		const pi = {
-			registerCommand: vi.fn(
-				(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-					registered = options;
-				},
-			),
-		} as unknown as ExtensionAPI;
-		registerSyncWebdavCommands(pi, () => root);
+		const { command: registered } = registerTestCommand(root);
 		const input = vi.fn();
 		const driver = createCustomDriver([
 			valueStep('Settings'),
@@ -272,7 +257,7 @@ describe('sync command registration', () => {
 		]);
 		const notify = vi.fn();
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: { custom: driver.custom, input, notify },
 		} as unknown as ExtensionCommandContext);
@@ -305,15 +290,7 @@ describe('sync command registration', () => {
 			},
 			version: 1,
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		const pi = {
-			registerCommand: vi.fn(
-				(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-					registered = options;
-				},
-			),
-		} as unknown as ExtensionAPI;
-		registerSyncWebdavCommands(pi, () => root);
+		const { command: registered } = registerTestCommand(root);
 		const input = vi
 			.fn()
 			.mockResolvedValueOnce(server.baseUrl)
@@ -329,7 +306,7 @@ describe('sync command registration', () => {
 			valueStep('Cancel'),
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: {
 				custom: driver.custom,
@@ -375,15 +352,7 @@ describe('sync command registration', () => {
 			version: 1 as const,
 		};
 		await writeConfig(root, existing);
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		const pi = {
-			registerCommand: vi.fn(
-				(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-					registered = options;
-				},
-			),
-		} as unknown as ExtensionAPI;
-		registerSyncWebdavCommands(pi, () => root);
+		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
 		const driver = createCustomDriver([
 			valueStep('Settings'),
@@ -393,7 +362,7 @@ describe('sync command registration', () => {
 			{ type: 'complete' },
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: {
 				custom: driver.custom,
@@ -431,15 +400,7 @@ describe('sync command registration', () => {
 			syncState,
 			version: 1,
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		const pi = {
-			registerCommand: vi.fn(
-				(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-					registered = options;
-				},
-			),
-		} as unknown as ExtensionAPI;
-		registerSyncWebdavCommands(pi, () => root);
+		const { command: registered } = registerTestCommand(root);
 		const driver = createCustomDriver([
 			valueStep('Settings'),
 			valueStep('Connection'),
@@ -450,7 +411,7 @@ describe('sync command registration', () => {
 			valueStep('Cancel'),
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: {
 				custom: driver.custom,
@@ -493,20 +454,10 @@ describe('sync command registration', () => {
 			files: [{ contents: Buffer.from('{}', 'utf8'), path: parseManifestPath('settings.json') }],
 		});
 		server.requests.splice(0);
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
 
-		await registered?.handler('status', {
+		await registered.handler('status', {
 			mode: 'print',
 			ui: { notify },
 		} as unknown as ExtensionCommandContext);
@@ -544,20 +495,10 @@ describe('sync command registration', () => {
 			parseRemotePath(connection.remotePath),
 		);
 		await store.ensureRoot();
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
 
-		await registered?.handler('status', {
+		await registered.handler('status', {
 			mode: 'print',
 			ui: { notify },
 		} as unknown as ExtensionCommandContext);
@@ -591,20 +532,10 @@ describe('sync command registration', () => {
 		);
 		await store.ensureRoot();
 		server.failNext('GET', 'sync-root/manifest.json', 403);
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
 
-		await registered?.handler('status', {
+		await registered.handler('status', {
 			mode: 'print',
 			ui: { notify },
 		} as unknown as ExtensionCommandContext);
@@ -640,17 +571,7 @@ describe('sync command registration', () => {
 		const store = new RemoteStore(gateway, parseRemotePath(nextConnection.remotePath));
 		await store.ensureRoot();
 		server.failNext('GET', 'new-root/manifest.json', 403);
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
 		const driver = createCustomDriver([
 			valueStep('Settings'),
@@ -661,7 +582,7 @@ describe('sync command registration', () => {
 			{ type: 'complete' },
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: {
 				custom: driver.custom,
@@ -694,17 +615,7 @@ describe('sync command registration', () => {
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
 		const driver = createCustomDriver([
 			valueStep('Settings'),
@@ -714,7 +625,7 @@ describe('sync command registration', () => {
 			valueStep('Cancel'),
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: { custom: driver.custom, input: vi.fn(), notify },
 		} as unknown as ExtensionCommandContext);
@@ -754,21 +665,11 @@ describe('sync command registration', () => {
 			expectedManifestSha256: undefined,
 			files: [{ contents: Buffer.from('{}'), path: parseManifestPath('settings.json') }],
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const driver = createCustomDriver([{ type: 'complete' }]);
 		const notify = vi.fn();
 
-		await registered?.handler('pull', {
+		await registered.handler('pull', {
 			mode: 'tui',
 			ui: { custom: driver.custom, notify },
 		} as unknown as ExtensionCommandContext);
@@ -803,17 +704,7 @@ describe('sync command registration', () => {
 		const store = new RemoteStore(gateway, parseRemotePath(connection.remotePath));
 		await store.ensureRoot();
 		await gateway.writeFile(parseRemotePath('sync-root/manifest.json'), Buffer.from('{', 'utf8'));
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const driver = createCustomDriver([
 			{ type: 'complete' },
 			valueStep(true),
@@ -821,7 +712,7 @@ describe('sync command registration', () => {
 		]);
 		const notify = vi.fn();
 
-		await registered?.handler('push', {
+		await registered.handler('push', {
 			mode: 'tui',
 			ui: { custom: driver.custom, notify },
 		} as unknown as ExtensionCommandContext);
@@ -864,17 +755,7 @@ describe('sync command registration', () => {
 				{ contents: Buffer.from('new b'), path: parseManifestPath('b.json') },
 			],
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const driver = createCustomDriver([
 			{ type: 'complete' },
 			{
@@ -886,7 +767,7 @@ describe('sync command registration', () => {
 		]);
 		const notify = vi.fn();
 
-		await registered?.handler('pull', {
+		await registered.handler('pull', {
 			mode: 'tui',
 			ui: { custom: driver.custom, notify },
 		} as unknown as ExtensionCommandContext);
@@ -906,17 +787,7 @@ describe('sync command registration', () => {
 		await mkdir(backupsDirectory, { mode: 0o700, recursive: true });
 		await writeFile(join(backupsDirectory, 'settings.json'), 'backup', 'utf8');
 		await writeFile(join(root, 'settings.json'), 'current', 'utf8');
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const driver = createCustomDriver([
 			{ type: 'complete' },
 			{
@@ -928,7 +799,7 @@ describe('sync command registration', () => {
 		]);
 		const notify = vi.fn();
 
-		await registered?.handler('restore', {
+		await registered.handler('restore', {
 			mode: 'tui',
 			ui: { custom: driver.custom, notify },
 		} as unknown as ExtensionCommandContext);
@@ -966,17 +837,7 @@ describe('sync command registration', () => {
 		await gateway.createDirectory(
 			parseRemotePath(`sync-root/.pi-sync-webdav-probe-${generateRevisionId()}`),
 		);
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
 		const driver = createCustomDriver([
 			valueStep('Clean remote residue'),
@@ -985,7 +846,7 @@ describe('sync command registration', () => {
 			{ type: 'complete' },
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: {
 				custom: driver.custom,
@@ -1016,17 +877,7 @@ describe('sync command registration', () => {
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const driver = createCustomDriver([
 			valueStep('Settings'),
 			valueStep('Push selection'),
@@ -1036,7 +887,7 @@ describe('sync command registration', () => {
 			valueStep('Cancel'),
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: { custom: driver.custom, input: vi.fn(), notify: vi.fn() },
 		} as unknown as ExtensionCommandContext);
@@ -1062,17 +913,7 @@ describe('sync command registration', () => {
 			pushInclude,
 			version: 1,
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		// No confirmation step is scripted: an unexpected warning would consume the
 		// Cancel step and leave the settings loop without a way to exit.
 		const driver = createCustomDriver([
@@ -1083,7 +924,7 @@ describe('sync command registration', () => {
 			valueStep('Cancel'),
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: { custom: driver.custom, input: vi.fn(), notify: vi.fn() },
 		} as unknown as ExtensionCommandContext);
@@ -1108,17 +949,7 @@ describe('sync command registration', () => {
 			pushInclude: [settings, sessions],
 			version: 1,
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		registerSyncWebdavCommands(
-			{
-				registerCommand: vi.fn(
-					(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-						registered = options;
-					},
-				),
-			} as unknown as ExtensionAPI,
-			() => root,
-		);
+		const { command: registered } = registerTestCommand(root);
 		const driver = createCustomDriver([
 			valueStep('Settings'),
 			valueStep('Push selection'),
@@ -1131,7 +962,7 @@ describe('sync command registration', () => {
 			valueStep('Cancel'),
 		]);
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: { custom: driver.custom, input: vi.fn(), notify: vi.fn() },
 		} as unknown as ExtensionCommandContext);
@@ -1154,15 +985,7 @@ describe('sync command registration', () => {
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
-		let registered: Parameters<ExtensionAPI['registerCommand']>[1] | undefined;
-		const pi = {
-			registerCommand: vi.fn(
-				(_name: string, options: Parameters<ExtensionAPI['registerCommand']>[1]) => {
-					registered = options;
-				},
-			),
-		} as unknown as ExtensionAPI;
-		registerSyncWebdavCommands(pi, () => root);
+		const { command: registered } = registerTestCommand(root);
 		let dashboardLines: string[] = [];
 		const driver = createCustomDriver([
 			{
@@ -1175,7 +998,7 @@ describe('sync command registration', () => {
 		]);
 		const notify = vi.fn();
 
-		await registered?.handler('', {
+		await registered.handler('', {
 			mode: 'tui',
 			ui: { custom: driver.custom, notify },
 		} as unknown as ExtensionCommandContext);
@@ -1186,7 +1009,7 @@ describe('sync command registration', () => {
 		expect(dashboardText).not.toContain('Push');
 		expect(dashboardText).not.toContain('Clean remote residue');
 
-		await registered?.handler('push', {
+		await registered.handler('push', {
 			mode: 'tui',
 			ui: { custom: driver.custom, notify },
 		} as unknown as ExtensionCommandContext);

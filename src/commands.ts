@@ -23,6 +23,7 @@ import {
 	collectLocalSelection,
 	DEFAULT_PUSH_INCLUDES,
 	listSelectionCandidates,
+	type LocalSelection,
 } from './selection.js';
 import {
 	applyStagedPull,
@@ -48,6 +49,18 @@ const SETTINGS_OPTIONS = ['Connection', 'Push selection', 'Cancel'] as const;
 const PASSWORD_OPTIONS = ['Keep current password', 'Change password', 'Cancel'] as const;
 const CLEANUP_OPTION = 'Clean remote residue';
 const CANCEL_OPTION = 'Cancel';
+const OPTIONAL_PATH_CONFIRMATIONS = [
+	{
+		message: 'Session data may contain private conversation content and can be large. Continue?',
+		path: 'sessions',
+		title: 'Include sessions?',
+	},
+	{
+		message: 'Authentication data is sensitive. Continue?',
+		path: 'auth.json',
+		title: 'Include authentication?',
+	},
+] as const;
 
 type SyncWebdavSubcommand = (typeof SUBCOMMANDS)[number] | 'dashboard';
 
@@ -93,13 +106,14 @@ function applyFailureMessage(
 	result: Exclude<ApplyResult, { readonly status: 'applied' }>,
 ): string {
 	const failure = `${operation} failed: ${result.failureMessage}`;
-	if (result.status === 'rolled-back') {
-		return `${failure}. Earlier local changes were rolled back.`;
+	switch (result.status) {
+		case 'failed':
+			return failure;
+		case 'rolled-back':
+			return `${failure}. Earlier local changes were rolled back.`;
+		case 'rollback-failed':
+			return `${failure}. Local rollback did not complete.`;
 	}
-	if (result.status === 'rollback-failed') {
-		return `${failure}. Local rollback did not complete.`;
-	}
-	return failure;
 }
 
 function isMutatingCommand(command: SyncWebdavSubcommand): boolean {
@@ -129,29 +143,27 @@ async function confirmOptionalPaths(
 	paths: readonly string[],
 	previouslyApproved: readonly string[],
 ): Promise<boolean> {
-	if (hasPath(paths, 'sessions') && !hasPath(previouslyApproved, 'sessions')) {
+	for (const confirmation of OPTIONAL_PATH_CONFIRMATIONS) {
 		if (
-			!(await confirmDialog(
-				ctx,
-				'Include sessions?',
-				'Session data may contain private conversation content and can be large. Continue?',
-			))
-		) {
-			return false;
-		}
-	}
-	if (hasPath(paths, 'auth.json') && !hasPath(previouslyApproved, 'auth.json')) {
-		if (
-			!(await confirmDialog(
-				ctx,
-				'Include authentication?',
-				'Authentication data is sensitive. Continue?',
-			))
+			hasPath(paths, confirmation.path) &&
+			!hasPath(previouslyApproved, confirmation.path) &&
+			!(await confirmDialog(ctx, confirmation.title, confirmation.message))
 		) {
 			return false;
 		}
 	}
 	return true;
+}
+
+function selectionWarnings(selection: LocalSelection): readonly string[] {
+	const warnings: string[] = [];
+	if (selection.secretWarningPaths.length > 0) {
+		warnings.push('Selected text may contain credentials.');
+	}
+	if (selection.skippedSymlinkPaths.length > 0) {
+		warnings.push('Symbolic links were skipped.');
+	}
+	return warnings;
 }
 
 async function loadSelectionCandidates(
@@ -402,14 +414,7 @@ async function runDiff(ctx: ExtensionCommandContext, agentRoot: string): Promise
 	}
 	const lines = formatPlanLines({
 		files: result.value.plan.actions,
-		warnings: [
-			...(result.value.selection.secretWarningPaths.length > 0
-				? ['Selected text may contain credentials.']
-				: []),
-			...(result.value.selection.skippedSymlinkPaths.length > 0
-				? ['Symbolic links were skipped.']
-				: []),
-		],
+		warnings: selectionWarnings(result.value.selection),
 	});
 	ctx.ui.notify(lines.length === 0 ? 'No changes.' : lines.join('\n'), 'info');
 }
@@ -450,14 +455,7 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 		preparation.plan.actions.length > 0 &&
 		!(await confirmSyncPlan(ctx, 'Push these changes to WebDAV?', {
 			files: preparation.plan.actions,
-			warnings: [
-				...(preparation.selection.secretWarningPaths.length > 0
-					? ['Selected text may contain credentials.']
-					: []),
-				...(preparation.selection.skippedSymlinkPaths.length > 0
-					? ['Symbolic links were skipped.']
-					: []),
-			],
+			warnings: selectionWarnings(preparation.selection),
 		}))
 	) {
 		return;

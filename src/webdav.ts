@@ -175,11 +175,6 @@ function responsePath(href: string, baseUrl: string): string {
 	}
 }
 
-function isRequestedResource(href: string, path: RemotePath, baseUrl: string): boolean {
-	const requested = responsePath(encodeRemotePath(path), baseUrl);
-	return responsePath(href, baseUrl) === requested;
-}
-
 function responseBasename(href: string, baseUrl: string): string {
 	const name = responsePath(href, baseUrl).split('/').at(-1);
 	if (name === undefined || name.length === 0) {
@@ -273,33 +268,19 @@ class SafeWebDavGateway implements WebDavGateway {
 		options?: WebDavRequestOptions,
 	): Promise<readonly RemoteDirectoryEntry[]> {
 		const remotePath = parseRemotePath(path);
-		const bytes = await this.#execute(async (signal) => {
-			const response = await this.#client.customRequest(remotePath, {
-				method: 'PROPFIND',
-				headers: {
-					Accept: 'text/plain,application/xml',
-					Depth: '1',
-				},
-				signal,
-			});
-			if (response.body === null) {
-				throw new WebDavRequestError('WebDAV response has no body', { retryable: false });
-			}
-			return readStreamWithLimit(
-				response.body as unknown as Readable,
-				this.#maxResponseBytes,
-				undefined,
-				signal,
-			);
-		}, normalizeRequestOptions(options));
+		const bytes = await this.#execute(
+			(signal) => this.#readPropfind(remotePath, '1', signal),
+			normalizeRequestOptions(options),
+		);
 		let parsed;
 		try {
 			parsed = await parseXML(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
 		} catch {
 			throw new WebDavRequestError('WebDAV directory response is invalid', { retryable: false });
 		}
+		const requestedPath = responsePath(encodeRemotePath(remotePath), this.#baseUrl);
 		return parsed.multistatus.response
-			.filter((entry) => !isRequestedResource(entry.href, remotePath, this.#baseUrl))
+			.filter((entry) => responsePath(entry.href, this.#baseUrl) !== requestedPath)
 			.map((entry) => {
 				if (entry.propstat === undefined) {
 					throw new WebDavRequestError('WebDAV directory response is invalid', {
@@ -319,25 +300,10 @@ class SafeWebDavGateway implements WebDavGateway {
 	async exists(path: RemotePath, options?: WebDavRequestOptions): Promise<boolean> {
 		const remotePath = parseRemotePath(path);
 		try {
-			await this.#execute(async (signal) => {
-				const response = await this.#client.customRequest(remotePath, {
-					method: 'PROPFIND',
-					headers: {
-						Accept: 'text/plain,application/xml',
-						Depth: '0',
-					},
-					signal,
-				});
-				if (response.body === null) {
-					throw new WebDavRequestError('WebDAV response has no body', { retryable: false });
-				}
-				await readStreamWithLimit(
-					response.body as unknown as Readable,
-					this.#maxResponseBytes,
-					undefined,
-					signal,
-				);
-			}, normalizeRequestOptions(options));
+			await this.#execute(
+				(signal) => this.#readPropfind(remotePath, '0', signal),
+				normalizeRequestOptions(options),
+			);
 			return true;
 		} catch (error: unknown) {
 			if (error instanceof WebDavRequestError && error.status === 404) {
@@ -382,12 +348,31 @@ class SafeWebDavGateway implements WebDavGateway {
 		}
 	}
 
+	async #readPropfind(path: RemotePath, depth: '0' | '1', signal: AbortSignal): Promise<Buffer> {
+		const response = await this.#client.customRequest(path, {
+			method: 'PROPFIND',
+			headers: {
+				Accept: 'text/plain,application/xml',
+				Depth: depth,
+			},
+			signal,
+		});
+		if (response.body === null) {
+			throw new WebDavRequestError('WebDAV response has no body', { retryable: false });
+		}
+		return readStreamWithLimit(
+			response.body as unknown as Readable,
+			this.#maxResponseBytes,
+			undefined,
+			signal,
+		);
+	}
+
 	async #execute<T>(
 		operation: (signal: AbortSignal) => Promise<T>,
 		options: WebDavRequestOptions = {},
 	): Promise<T> {
-		let latestError: WebDavRequestError | undefined;
-		for (let attempt = 0; attempt <= this.#retryDelaysMs.length; attempt += 1) {
+		for (let attempt = 0; ; attempt += 1) {
 			if (options.signal?.aborted) {
 				throw new WebDavRequestError('WebDAV request cancelled', { retryable: false });
 			}
@@ -395,7 +380,6 @@ class SafeWebDavGateway implements WebDavGateway {
 				return await this.#executeOnce(operation, options.signal);
 			} catch (error: unknown) {
 				const safeError = toSafeRequestError(error);
-				latestError = safeError;
 				const delay = this.#retryDelaysMs[attempt];
 				if (!safeError.retryable || delay === undefined) {
 					throw safeError;
@@ -404,7 +388,6 @@ class SafeWebDavGateway implements WebDavGateway {
 				await waitForRetryDelay(delay, options.signal);
 			}
 		}
-		throw latestError ?? new WebDavRequestError('WebDAV request failed', { retryable: false });
 	}
 
 	async #executeOnce<T>(

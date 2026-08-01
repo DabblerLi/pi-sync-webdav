@@ -89,7 +89,7 @@ export class MockWebDavServer {
 	setFile(path: string, contents: Buffer): void {
 		const normalizedPath = normalizePath(path);
 		const parent = parentPath(normalizedPath);
-		if (!this.#entries.get(parent)?.type || this.#entries.get(parent)?.type !== 'directory') {
+		if (this.#entries.get(parent)?.type !== 'directory') {
 			throw new Error('Parent directory does not exist');
 		}
 		this.#entries.set(normalizedPath, { contents, type: 'file' });

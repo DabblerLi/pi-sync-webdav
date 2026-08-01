@@ -77,7 +77,12 @@ function invalidPackageSource(): never {
 }
 
 function packageSourceString(value: unknown): string {
-	const source = typeof value === 'string' ? value : isRecord(value) ? value.source : undefined;
+	let source: unknown;
+	if (typeof value === 'string') {
+		source = value;
+	} else if (isRecord(value)) {
+		source = value.source;
+	}
 	if (
 		typeof source !== 'string' ||
 		source.length === 0 ||
@@ -94,6 +99,7 @@ function splitPackageDeclarations(value: readonly PackageSource[] | undefined): 
 }
 
 const MAX_PERCENT_DECODE_DEPTH = 8;
+const PACKAGE_FAILURE_MESSAGE = 'One or more Pi package operations failed. Resolve them manually.';
 const UNSAFE_GIT_REF_CHARACTERS = new Set(['~', '^', ':', '?', '*', '[', '\\', '@']);
 
 function decodePackageSpecPart(value: string): string {
@@ -244,8 +250,17 @@ function describeHostedGitSource(raw: string): DescribedGitSource | undefined {
 	if (raw.includes('?')) {
 		invalidPackageSource();
 	}
-	const host =
-		match[1] === 'github' ? 'github.com' : match[1] === 'gitlab' ? 'gitlab.com' : 'bitbucket.org';
+	let host: string;
+	switch (match[1]) {
+		case 'github':
+			host = 'github.com';
+			break;
+		case 'gitlab':
+			host = 'gitlab.com';
+			break;
+		default:
+			host = 'bitbucket.org';
+	}
 	const sourcePath = match[2];
 	if (sourcePath === undefined) {
 		invalidPackageSource();
@@ -276,16 +291,12 @@ function describeGitSource(source: string): DescribedGitSource | undefined {
 		!source.startsWith('git:') &&
 		!source.startsWith('https://') &&
 		!source.startsWith('http://') &&
-		!source.startsWith('ssh://') &&
-		!source.startsWith('git://')
+		!source.startsWith('ssh://')
 	) {
 		return undefined;
 	}
 
-	const raw =
-		source.startsWith('git:') && !source.startsWith('git://')
-			? source.slice('git:'.length)
-			: source;
+	const raw = source.startsWith('git:') ? source.slice('git:'.length) : source;
 	if (raw.length === 0) {
 		invalidPackageSource();
 	}
@@ -438,7 +449,10 @@ function compareOperations(left: PackageOperation, right: PackageOperation): num
 	if (left.action !== right.action) {
 		return actionOrder[left.action] - actionOrder[right.action];
 	}
-	return left.source < right.source ? -1 : left.source > right.source ? 1 : 0;
+	if (left.source === right.source) {
+		return 0;
+	}
+	return left.source < right.source ? -1 : 1;
 }
 
 export function readGlobalPackageSources(
@@ -474,21 +488,20 @@ export async function planPackageSync(input: {
 		const next = after.get(identity);
 		if (next === undefined) {
 			operations.push({ action: 'remove', source: previous.source });
-		} else if (next.source !== previous.source) {
-			if (
-				previous.gitTransport !== undefined &&
-				next.gitTransport !== undefined &&
-				previous.gitTransport !== next.gitTransport
-			) {
-				operations.push({
-					action: 'replace',
-					previousSource: previous.source,
-					source: next.source,
-				});
-			} else {
-				operations.push({ action: 'update', source: next.source });
-			}
+			continue;
 		}
+		if (next.source === previous.source) {
+			continue;
+		}
+		const transportChanged =
+			previous.gitTransport !== undefined &&
+			next.gitTransport !== undefined &&
+			previous.gitTransport !== next.gitTransport;
+		operations.push(
+			transportChanged
+				? { action: 'replace', previousSource: previous.source, source: next.source }
+				: { action: 'update', source: next.source },
+		);
 	}
 	for (const [identity, next] of after) {
 		if (!before.has(identity)) {
@@ -510,7 +523,7 @@ export async function applyPackageOperations(
 		failed,
 		failureMessage:
 			failed.length > 0 || succeeded.length < operations.length
-				? 'One or more Pi package operations failed. Resolve them manually.'
+				? PACKAGE_FAILURE_MESSAGE
 				: undefined,
 		succeeded,
 	});
@@ -545,10 +558,7 @@ export async function applyPackageOperations(
 	}
 	return {
 		failed,
-		failureMessage:
-			failed.length === 0
-				? undefined
-				: 'One or more Pi package operations failed. Resolve them manually.',
+		failureMessage: failed.length === 0 ? undefined : PACKAGE_FAILURE_MESSAGE,
 		succeeded,
 	};
 }

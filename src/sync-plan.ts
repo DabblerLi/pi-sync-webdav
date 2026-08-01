@@ -75,7 +75,10 @@ function sha256(contents: Buffer): string {
 }
 
 function comparePaths(left: SafeRelativePath, right: SafeRelativePath): number {
-	return left < right ? -1 : left > right ? 1 : 0;
+	if (left === right) {
+		return 0;
+	}
+	return left < right ? -1 : 1;
 }
 
 function expectedFromObservation(
@@ -102,14 +105,6 @@ function isMissingPath(error: unknown): error is NodeJS.ErrnoException {
 
 function localDestinationKey(path: SafeRelativePath, caseInsensitiveDestination: boolean): string {
 	return caseInsensitiveDestination ? path.toLocaleLowerCase('en-US') : path;
-}
-
-function assertNoLocalDestinationCollisions(
-	paths: readonly SafeRelativePath[],
-	caseInsensitiveDestination: boolean,
-	errorMessage = 'Remote manifest contains colliding local paths',
-): void {
-	assertNoPathCollisions(paths, errorMessage, caseInsensitiveDestination);
 }
 
 async function observeLocalFile(
@@ -168,9 +163,8 @@ export function planPush(input: {
 	if (localByPath.size !== localFiles.length) {
 		throw new Error('Duplicate local selection path');
 	}
-	assertNoLocalDestinationCollisions(
+	assertNoPathCollisions(
 		localFiles.map((file) => file.path),
-		true,
 		'Local selection contains colliding destinations',
 	);
 	const remoteByPath = toRemoteManifestFiles(input.remote);
@@ -230,8 +224,9 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 	throwIfOperationCancelled(input.operation?.signal);
 	const manifest = validateManifest(input.manifest);
 	const caseInsensitiveDestination = input.caseInsensitiveDestination ?? true;
-	assertNoLocalDestinationCollisions(
+	assertNoPathCollisions(
 		manifest.files.map((file) => file.path),
+		'Remote manifest contains colliding local paths',
 		caseInsensitiveDestination,
 	);
 
@@ -261,10 +256,10 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 			deletionCandidates.push(path);
 		}
 	}
-	assertNoLocalDestinationCollisions(
+	assertNoPathCollisions(
 		[...manifest.files.map((file) => file.path), ...deletionCandidates],
-		caseInsensitiveDestination,
 		'Managed paths collide with remote local destinations',
+		caseInsensitiveDestination,
 	);
 
 	const actions: FileMutation[] = [];
@@ -313,19 +308,17 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 		}
 	}
 
-	if (deletionCandidates.length > 0) {
-		for (const path of deletionCandidates) {
-			throwIfOperationCancelled(input.operation?.signal);
-			const local = await observeLocalFile(input.agentRoot, path, input.operation);
-			countObservedBytes(local);
-			if (local !== undefined) {
-				actions.push({
-					action: 'delete',
-					expectedLocal: expectedFromObservation(local),
-					path,
-					source: undefined,
-				});
-			}
+	for (const path of deletionCandidates) {
+		throwIfOperationCancelled(input.operation?.signal);
+		const local = await observeLocalFile(input.agentRoot, path, input.operation);
+		countObservedBytes(local);
+		if (local !== undefined) {
+			actions.push({
+				action: 'delete',
+				expectedLocal: expectedFromObservation(local),
+				path,
+				source: undefined,
+			});
 		}
 	}
 

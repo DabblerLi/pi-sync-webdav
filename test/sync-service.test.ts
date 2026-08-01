@@ -42,14 +42,15 @@ async function createStore(remotePath = 'pi-sync-webdav') {
 		url: server.baseUrl,
 		username: 'alice',
 	});
+	const gateway = createWebDavGateway(connection, {
+		requestTimeoutMs: 1_000,
+		retryDelaysMs: [],
+	});
 	return {
 		connection,
-		gateway: createWebDavGateway(connection, { requestTimeoutMs: 1_000, retryDelaysMs: [] }),
+		gateway,
 		server,
-		store: new RemoteStore(
-			createWebDavGateway(connection, { requestTimeoutMs: 1_000, retryDelaysMs: [] }),
-			parseRemotePath(remotePath),
-		),
+		store: new RemoteStore(gateway, parseRemotePath(remotePath)),
 	};
 }
 

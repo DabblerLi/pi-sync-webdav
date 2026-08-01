@@ -374,10 +374,12 @@ function planDisplayLimits(input: Parameters<typeof formatPlanLines>[0]): {
 
 	let maxFiles = Math.min(input.files.length, Math.ceil(MAX_VISIBLE_PLAN_OPERATIONS / 2));
 	let maxPackages = Math.min(packageCount, MAX_VISIBLE_PLAN_OPERATIONS - maxFiles);
-	let remaining = MAX_VISIBLE_PLAN_OPERATIONS - maxFiles - maxPackages;
-	maxFiles += Math.min(remaining, input.files.length - maxFiles);
-	remaining = MAX_VISIBLE_PLAN_OPERATIONS - maxFiles - maxPackages;
-	maxPackages += Math.min(remaining, packageCount - maxPackages);
+	const remaining = MAX_VISIBLE_PLAN_OPERATIONS - maxFiles - maxPackages;
+	if (maxFiles < input.files.length) {
+		maxFiles += Math.min(remaining, input.files.length - maxFiles);
+	} else {
+		maxPackages += Math.min(remaining, packageCount - maxPackages);
+	}
 	return { maxFiles, maxPackages };
 }
 

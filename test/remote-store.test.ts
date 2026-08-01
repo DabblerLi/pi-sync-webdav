@@ -35,6 +35,24 @@ async function createStore(remoteRoot = 'pi-sync-webdav') {
 	return { gateway, root, server, store: new RemoteStore(gateway, root) };
 }
 
+function overrideGateway(gateway: WebDavGateway, overrides: Partial<WebDavGateway>): WebDavGateway {
+	return {
+		createDirectory:
+			overrides.createDirectory ?? ((path, options) => gateway.createDirectory(path, options)),
+		deletePath: overrides.deletePath ?? ((path, options) => gateway.deletePath(path, options)),
+		directoryContents:
+			overrides.directoryContents ?? ((path, options) => gateway.directoryContents(path, options)),
+		exists: overrides.exists ?? ((path, options) => gateway.exists(path, options)),
+		readFile:
+			overrides.readFile ??
+			((path, onProgress, options) => gateway.readFile(path, onProgress, options)),
+		writeFile:
+			overrides.writeFile ??
+			((path, contents, onProgress, options) =>
+				gateway.writeFile(path, contents, onProgress, options)),
+	};
+}
+
 describe('remote store', () => {
 	it('creates nested roots and verifies write capability with a temporary probe', async () => {
 		const { root, store } = await createStore('pi/pi-sync-webdav');
@@ -123,12 +141,7 @@ describe('remote store', () => {
 		if (firstSnapshot === undefined) {
 			throw new Error('Expected a manifest after publishing');
 		}
-		const truncatingGateway: WebDavGateway = {
-			createDirectory: (path, options) => gateway.createDirectory(path, options),
-			deletePath: (path, options) => gateway.deletePath(path, options),
-			directoryContents: (path, options) => gateway.directoryContents(path, options),
-			exists: (path, options) => gateway.exists(path, options),
-			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
+		const truncatingGateway = overrideGateway(gateway, {
 			writeFile: (path, contents, onProgress, options) =>
 				gateway.writeFile(
 					path,
@@ -136,7 +149,7 @@ describe('remote store', () => {
 					onProgress,
 					options,
 				),
-		};
+		});
 
 		await expect(
 			new RemoteStore(truncatingGateway, root).publishRevision({
@@ -166,12 +179,7 @@ describe('remote store', () => {
 			throw new Error('Expected a manifest after publishing');
 		}
 		const manifestPath = parseRemotePath(`${root}/manifest.json`);
-		const rewritingGateway: WebDavGateway = {
-			createDirectory: (path, options) => gateway.createDirectory(path, options),
-			deletePath: (path, options) => gateway.deletePath(path, options),
-			directoryContents: (path, options) => gateway.directoryContents(path, options),
-			exists: (path, options) => gateway.exists(path, options),
-			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
+		const rewritingGateway = overrideGateway(gateway, {
 			writeFile: async (path, contents, onProgress, options) => {
 				if (path !== manifestPath) {
 					await gateway.writeFile(path, contents, onProgress, options);
@@ -185,7 +193,7 @@ describe('remote store', () => {
 					options,
 				);
 			},
-		};
+		});
 
 		await expect(
 			new RemoteStore(rewritingGateway, root).publishRevision({
@@ -285,19 +293,14 @@ describe('remote store', () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
 		const manifestPath = parseRemotePath(`${root}/manifest.json`);
-		const suppressingGateway: WebDavGateway = {
-			createDirectory: (path) => gateway.createDirectory(path),
-			deletePath: (path) => gateway.deletePath(path),
-			directoryContents: (path) => gateway.directoryContents(path),
-			exists: (path) => gateway.exists(path),
-			readFile: (path, onProgress) => gateway.readFile(path, onProgress),
+		const suppressingGateway = overrideGateway(gateway, {
 			writeFile: async (path, contents, onProgress) => {
 				if (path === manifestPath) {
 					return;
 				}
 				await gateway.writeFile(path, contents, onProgress);
 			},
-		};
+		});
 
 		await expect(
 			new RemoteStore(suppressingGateway, root).publishRevision({
@@ -314,11 +317,7 @@ describe('remote store', () => {
 		await store.ensureRoot();
 		const manifestPath = parseRemotePath(`${root}/manifest.json`);
 		let manifestWriteObserved = false;
-		const unreadableManifestGateway: WebDavGateway = {
-			createDirectory: (path) => gateway.createDirectory(path),
-			deletePath: (path) => gateway.deletePath(path),
-			directoryContents: (path) => gateway.directoryContents(path),
-			exists: (path) => gateway.exists(path),
+		const unreadableManifestGateway = overrideGateway(gateway, {
 			readFile: async (path, onProgress) => {
 				if (manifestWriteObserved && path === manifestPath) {
 					throw new WebDavRequestError('WebDAV request failed with HTTP status 503', {
@@ -334,7 +333,7 @@ describe('remote store', () => {
 					manifestWriteObserved = true;
 				}
 			},
-		};
+		});
 
 		await expect(
 			new RemoteStore(unreadableManifestGateway, root).publishRevision({
@@ -350,12 +349,7 @@ describe('remote store', () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
 		const manifestPath = parseRemotePath(`${root}/manifest.json`);
-		const delayedGateway: WebDavGateway = {
-			createDirectory: (path, options) => gateway.createDirectory(path, options),
-			deletePath: (path, options) => gateway.deletePath(path, options),
-			directoryContents: (path, options) => gateway.directoryContents(path, options),
-			exists: (path, options) => gateway.exists(path, options),
-			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
+		const delayedGateway = overrideGateway(gateway, {
 			writeFile: async (path, contents, onProgress, options) => {
 				if (path === manifestPath) {
 					setTimeout(() => {
@@ -365,7 +359,7 @@ describe('remote store', () => {
 				}
 				await gateway.writeFile(path, contents, onProgress, options);
 			},
-		};
+		});
 
 		await expect(
 			new RemoteStore(delayedGateway, root).publishRevision({
@@ -387,11 +381,7 @@ describe('remote store', () => {
 	it('validates read capability independently from write probing', async () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
-		const unreadableGateway: WebDavGateway = {
-			createDirectory: (path, options) => gateway.createDirectory(path, options),
-			deletePath: (path, options) => gateway.deletePath(path, options),
-			directoryContents: (path, options) => gateway.directoryContents(path, options),
-			exists: (path, options) => gateway.exists(path, options),
+		const unreadableGateway = overrideGateway(gateway, {
 			readFile: async (path, onProgress, options) => {
 				if (path === parseRemotePath(`${root}/manifest.json`)) {
 					throw new WebDavRequestError('WebDAV authorization failed', {
@@ -401,9 +391,7 @@ describe('remote store', () => {
 				}
 				return gateway.readFile(path, onProgress, options);
 			},
-			writeFile: (path, contents, onProgress, options) =>
-				gateway.writeFile(path, contents, onProgress, options),
-		};
+		});
 
 		await expect(
 			new RemoteStore(unreadableGateway, root).verifyReadCapability(),
@@ -551,19 +539,14 @@ describe('remote store', () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
 		const manifestPath = parseRemotePath(`${root}/manifest.json`);
-		const failingGateway: WebDavGateway = {
-			createDirectory: (path, options) => gateway.createDirectory(path, options),
-			deletePath: (path, options) => gateway.deletePath(path, options),
-			directoryContents: (path, options) => gateway.directoryContents(path, options),
-			exists: (path, options) => gateway.exists(path, options),
-			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
+		const failingGateway = overrideGateway(gateway, {
 			writeFile: async (path, contents, onProgress, options) => {
 				if (path === manifestPath) {
 					throw new WebDavRequestError('WebDAV network request failed', { retryable: false });
 				}
 				await gateway.writeFile(path, contents, onProgress, options);
 			},
-		};
+		});
 
 		await expect(
 			new RemoteStore(failingGateway, root).publishRevision({
@@ -578,7 +561,7 @@ describe('remote store', () => {
 	it('reports a failed capability probe without treating the connection as writable', async () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
-		const failingGateway: WebDavGateway = {
+		const failingGateway = overrideGateway(gateway, {
 			createDirectory: async (path) => {
 				if (path.includes('.pi-sync-webdav-probe-')) {
 					throw new WebDavRequestError('WebDAV authorization failed', {
@@ -588,12 +571,7 @@ describe('remote store', () => {
 				}
 				await gateway.createDirectory(path);
 			},
-			deletePath: (path) => gateway.deletePath(path),
-			directoryContents: (path) => gateway.directoryContents(path),
-			exists: (path) => gateway.exists(path),
-			readFile: (path, onProgress) => gateway.readFile(path, onProgress),
-			writeFile: (path, contents, onProgress) => gateway.writeFile(path, contents, onProgress),
-		};
+		});
 		const failingStore = new RemoteStore(failingGateway, root);
 
 		await expect(failingStore.verifyWriteCapability()).resolves.toEqual({
@@ -606,12 +584,7 @@ describe('remote store', () => {
 	it('marks the connection read-only when probe writes are denied', async () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
-		const failingGateway: WebDavGateway = {
-			createDirectory: (path) => gateway.createDirectory(path),
-			deletePath: (path) => gateway.deletePath(path),
-			directoryContents: (path) => gateway.directoryContents(path),
-			exists: (path) => gateway.exists(path),
-			readFile: (path, onProgress) => gateway.readFile(path, onProgress),
+		const failingGateway = overrideGateway(gateway, {
 			writeFile: async (path, contents, onProgress) => {
 				if (path.includes('.pi-sync-webdav-probe-')) {
 					throw new WebDavRequestError('WebDAV authorization failed', {
@@ -621,7 +594,7 @@ describe('remote store', () => {
 				}
 				await gateway.writeFile(path, contents, onProgress);
 			},
-		};
+		});
 
 		await expect(new RemoteStore(failingGateway, root).verifyWriteCapability()).resolves.toEqual({
 			canWrite: false,
@@ -633,7 +606,7 @@ describe('remote store', () => {
 	it('cleans a probe when directory creation has an unknown outcome', async () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
-		const uncertainGateway: WebDavGateway = {
+		const uncertainGateway = overrideGateway(gateway, {
 			createDirectory: async (path) => {
 				if (path.includes('.pi-sync-webdav-probe-')) {
 					await gateway.createDirectory(path);
@@ -641,12 +614,7 @@ describe('remote store', () => {
 				}
 				await gateway.createDirectory(path);
 			},
-			deletePath: (path) => gateway.deletePath(path),
-			directoryContents: (path) => gateway.directoryContents(path),
-			exists: (path) => gateway.exists(path),
-			readFile: (path, onProgress) => gateway.readFile(path, onProgress),
-			writeFile: (path, contents, onProgress) => gateway.writeFile(path, contents, onProgress),
-		};
+		});
 
 		await expect(new RemoteStore(uncertainGateway, root).verifyWriteCapability()).resolves.toEqual({
 			canWrite: false,
@@ -660,8 +628,7 @@ describe('remote store', () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
 		const controller = new AbortController();
-		const cancelledGateway: WebDavGateway = {
-			createDirectory: (path, options) => gateway.createDirectory(path, options),
+		const cancelledGateway = overrideGateway(gateway, {
 			deletePath: async (path) => {
 				if (path.includes('.pi-sync-webdav-probe-')) {
 					throw new WebDavRequestError('WebDAV authorization failed', {
@@ -671,9 +638,6 @@ describe('remote store', () => {
 				}
 				await gateway.deletePath(path);
 			},
-			directoryContents: (path, options) => gateway.directoryContents(path, options),
-			exists: (path, options) => gateway.exists(path, options),
-			readFile: (path, onProgress, options) => gateway.readFile(path, onProgress, options),
 			writeFile: async (path) => {
 				if (path.includes('.pi-sync-webdav-probe-')) {
 					controller.abort();
@@ -681,7 +645,7 @@ describe('remote store', () => {
 				}
 				throw new Error('Unexpected write request');
 			},
-		};
+		});
 
 		const error = await new RemoteStore(cancelledGateway, root)
 			.verifyWriteCapability({ signal: controller.signal })
@@ -696,8 +660,7 @@ describe('remote store', () => {
 	it('reports probe cleanup residue when deletes are denied', async () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
-		const failingGateway: WebDavGateway = {
-			createDirectory: (path) => gateway.createDirectory(path),
+		const failingGateway = overrideGateway(gateway, {
 			deletePath: async (path) => {
 				if (path.includes('.pi-sync-webdav-probe-')) {
 					throw new WebDavRequestError('WebDAV authorization failed', {
@@ -707,11 +670,7 @@ describe('remote store', () => {
 				}
 				await gateway.deletePath(path);
 			},
-			directoryContents: (path) => gateway.directoryContents(path),
-			exists: (path) => gateway.exists(path),
-			readFile: (path, onProgress) => gateway.readFile(path, onProgress),
-			writeFile: (path, contents, onProgress) => gateway.writeFile(path, contents, onProgress),
-		};
+		});
 
 		await expect(new RemoteStore(failingGateway, root).verifyWriteCapability()).resolves.toEqual({
 			canWrite: false,
