@@ -4,10 +4,10 @@
 
 `pi-sync-webdav` is a Pi Package for manual configuration sync over one Basic Auth WebDAV connection.
 
-- Commands: `/sync-webdav`, `settings`, `status`, `diff`, `push`, `pull`, and `restore`.
-- `/sync-webdav` initializes an unconfigured package; otherwise its dashboard offers the commands and manual remote-residue cleanup. `settings` edits either the complete connection or the local push selection. Saving a connection validates read and write access but does not start a push or pull.
+- Commands: `/sync-webdav`, `settings`, `status`, `diff`, `push`, `pull`, `restore`, and `cleanup`.
+- `/sync-webdav` initializes an unconfigured package; otherwise its dashboard offers routine commands. `cleanup` remains available only as an explicit subcommand. `settings` edits either the complete connection or the local push selection. Saving a connection validates read and write access but does not start a push or pull.
 - Sync is always user initiated. There is no background sync, file watching, multi-target support, ETag/LOCK handling, remote history, or backward compatibility.
-- The plugin supports standard WebDAV operations only: `MKCOL`, `PROPFIND`, `GET`, `PUT`, and `DELETE`.
+- The plugin supports standard WebDAV operations only: `COPY`, `MKCOL`, `PROPFIND`, `GET`, `PUT`, and `DELETE`.
 
 ## Private local state
 
@@ -34,7 +34,7 @@ The user-configured remote path is an exclusive plugin root:
 
 `manifest.json` contains the current format version, one lowercase UUID-v4 revision ID, and each file's relative path, SHA-256, and size.
 
-A push uploads a complete new revision, rechecks the current manifest hash, and writes `manifest.json` last. A revision is not active until referenced by the manifest. After a verified commit, the previous current-format revision is removed. Failed cleanup or uncertain activation is surfaced in the current interaction. Dashboard cleanup revalidates the manifest before deleting only recognized inactive plugin residue; unknown items are retained.
+A push creates a complete new revision. When a current revision exists, the server clones it with `COPY`, then only changed files are uploaded and removed paths are deleted. The current manifest hash is rechecked before `manifest.json` is written last. A revision is not active until referenced by the manifest. After a verified commit, the previous current-format revision is removed. Failed cleanup or uncertain activation is surfaced in the current interaction. Explicit cleanup revalidates the manifest before deleting only recognized inactive plugin residue; unknown items are retained.
 
 If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. Push can overwrite it only after an explicit risk confirmation and never migrates or deletes its legacy data.
 
@@ -43,10 +43,10 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 - The local include list affects push only. Pull always applies the remote manifest.
 - Only files listed in the manifest are materialized; absent or empty directories are not created by pull.
 - Pushes and pulls with changes present one batch confirmation using file paths and add/update/delete actions. A permission-only `SECURE auth.json` action is also confirmed.
-- Pull downloads and verifies every file before replacing local files. Local backups are created before overwrites or managed-file deletions.
+- Pull downloads and verifies only added or updated files before replacing local files. Unchanged files, deletions, and permission-only repairs require no file download. Local backups are created before overwrites or managed-file deletions.
 - Pull deletes only paths recorded in matching local sync state that are absent from the current manifest. First pull or a changed connection never deletes local files.
 - Independent file reads, validation, uploads, and downloads run with a concurrency limit of four. Manifest activation, backups, local application, and rollback remain serial.
-- Interactive connection validation, push, pull, restore, and dashboard cleanup report safe phase and retry progress. Esc requests cancellation at supported network and file boundaries; staging cleanup and remote commit verification complete before the interaction finishes.
+- Interactive connection validation, push, pull, restore, and cleanup report safe phase and retry progress. Esc requests cancellation at supported network and file boundaries; staging cleanup and remote commit verification complete before the interaction finishes.
 - Cancelling or failing an operation leaves active local and remote versions intact where possible. A revision may be deleted only after verifying that the current manifest does not reference it.
 - `restore` restores local backups only.
 

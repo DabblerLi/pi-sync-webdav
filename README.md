@@ -48,8 +48,9 @@ pi update --extensions
 | `/sync-webdav push`     | Uploads the selected local configuration.                                       |
 | `/sync-webdav pull`     | Downloads and applies the remote configuration after confirmation.              |
 | `/sync-webdav restore`  | Reapplies the most recent local backups created by a prior pull.                |
+| `/sync-webdav cleanup`  | Removes verified remote residue left by a failed or interrupted operation.      |
 
-`status` and `diff` are read-only and can run non-interactively. `settings`, `push`, `pull`, and `restore` require an interactive Pi TUI.
+`status` and `diff` are read-only and can run non-interactively. Other commands require an interactive Pi TUI.
 
 ## What syncs
 
@@ -63,11 +64,10 @@ The top-level `npm/`, `git/`, and `pi-sync-webdav/` directories are never synced
 
 ## How sync works
 
-- **push** publishes your currently selected local files to the dedicated remote folder.
-- **pull** applies the remote file set, even if your local push selection is different. Review the planned additions, updates, and removals before confirming.
-- Before pull replaces or removes a managed local file, it keeps a local backup of that file.
+- **push** publishes your currently selected local files to the dedicated remote folder. After the first push, unchanged files are reused on the server and only changed files are uploaded.
+- **pull** applies the remote file set, even if your local push selection is different. Only added or updated files are downloaded. Review the planned additions, updates, and removals before confirming.
 - **restore** reapplies those local file backups after confirmation. It does not restore a remote version and does not reinstall Pi packages.
-- Backups live in `pi-sync-webdav/backups/` inside the Pi agent directory and mirror each file's original relative path. They hold the files replaced or removed by the most recent pull: the next pull that changes local files replaces the whole set, and restore leaves backups in place. To clear backups, delete that folder or single files inside it.
+- Before pull replaces or removes managed local files, it backs them up under `pi-sync-webdav/backups/` in the Pi agent directory. Only the latest changed pull is kept; restore leaves the backup in place.
 
 ## Remote access and safety
 
@@ -75,7 +75,7 @@ The top-level `npm/`, `git/`, and `pi-sync-webdav/` directories are never synced
 - If the remote folder can be read but not written, the connection is saved as read-only. You can still use `status`, `diff`, and `pull`; `push` and residue cleanup are unavailable.
 - Saving a connection only tests access—it never starts a push or pull.
 - Long-running actions show progress and can be cancelled with Esc.
-- For writable connections, the dashboard offers **Clean remote residue** to remove old sync data left by failed or cancelled attempts.
+- If an operation reports remote residue, run `/sync-webdav cleanup` to remove it.
 
 ## Pi packages
 

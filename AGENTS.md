@@ -5,7 +5,7 @@ Read `docs/design.md` before changing implementation code. Treat the following a
 ## Current design
 
 - The package currently supports one manually initiated Basic Auth WebDAV target.
-- Pushes publish a complete new revision and activate it through `manifest.json`.
+- Pushes publish a complete new revision; when a current revision exists, they clone it with WebDAV `COPY`, upload changed files, and activate it through `manifest.json`.
 - Local backups, safe pull deletion based on matching `syncState`, path validation, and symlink protection are part of the current safety model.
 - Top-level `npm/`, `git/`, and `pi-sync-webdav/` directories are excluded from synchronization. `logs/` and `node_modules/` are excluded at every depth.
 - File reads, validation, uploads, and downloads use bounded concurrency. Manifest activation, local application, backups, and rollback remain serial.

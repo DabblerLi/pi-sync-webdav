@@ -48,8 +48,9 @@ pi update --extensions
 | `/sync-webdav push`     | 上传选定的本地配置。                               |
 | `/sync-webdav pull`     | 确认后下载并应用远端配置。                         |
 | `/sync-webdav restore`  | 恢复先前 pull 产生的最新本地备份。                 |
+| `/sync-webdav cleanup`  | 清理失败或中断的操作留下的、经过验证的远端残留。   |
 
-`status` 和 `diff` 是只读的，可在非交互模式运行。`settings`、`push`、`pull` 和 `restore` 需要交互式 Pi TUI。
+`status` 和 `diff` 是只读的，可在非交互模式运行。其他命令需要交互式 Pi TUI。
 
 ## 同步内容
 
@@ -63,11 +64,10 @@ pi update --extensions
 
 ## 同步工作原理
 
-- **push** 把你当前选中的本地文件发布到专用远端文件夹。
-- **pull** 应用远端文件集，即使你本地的 push 选择范围不同。确认前请审阅计划的新增、更新和删除。
-- pull 在覆盖或删除受管本地文件前，会为该文件保留一份本地备份。
+- **push** 把你当前选中的本地文件发布到专用远端文件夹。首次 push 后，远端会复用未变化的文件，只上传发生变化的文件。
+- **pull** 应用远端文件集，即使你本地的 push 选择范围不同。只会下载新增或发生变化的文件。确认前请审阅计划的新增、更新和删除。
 - **restore** 在确认后重新应用这些本地文件备份。它不会恢复远端版本，也不会重新安装 Pi 扩展包。
-- 备份位于 Pi agent 目录下的 `pi-sync-webdav/backups/`，按文件原相对路径存放。备份保存的是最近一次 pull 中被覆盖或删除的文件：下一次产生本地变更的 pull 会整体替换这批备份，restore 也不会删除备份。如需清除，删除该文件夹或其中的单个文件即可。
+- pull 覆盖或删除受管本地文件前，会将它们备份到 Pi agent 目录下的 `pi-sync-webdav/backups/`。只保留最近一次产生变更的 pull 所对应的备份，restore 后备份仍会保留。
 
 ## 远端访问与安全
 
@@ -75,7 +75,7 @@ pi update --extensions
 - 如果远端文件夹可读但不可写，连接会保存为只读模式。你仍可使用 `status`、`diff` 和 `pull`；`push` 和残留清理不可用。
 - 保存连接只会测试访问，不会自动开始 push 或 pull。
 - 耗时操作会显示进度，可按 Esc 取消。
-- 对于可写连接，仪表盘提供 **Clean remote residue**，用于清理因失败或取消而留下的旧同步数据。
+- 如果操作提示存在远端残留，请执行 `/sync-webdav cleanup` 进行清理。
 
 ## Pi 扩展包
 
