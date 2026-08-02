@@ -102,11 +102,11 @@ describe('WebDAV gateway', () => {
 		await setupGateway.createDirectory(root);
 		await setupGateway.writeFile(file, Buffer.from('retry', 'utf8'));
 		const gateway = createWebDavGateway(testConnection(server), {
-			requestTimeoutMs: 10,
+			requestTimeoutMs: 500,
 			retryDelaysMs: [0, 0],
 		});
 		server.failNext('GET', 'pi-sync-webdav/retry-timeout.txt', 429);
-		server.delayNext('GET', 'pi-sync-webdav/retry-timeout.txt', 50);
+		server.stallNextBody('GET', file, Buffer.from('partial', 'utf8'));
 
 		await expect(gateway.readFile(file)).resolves.toEqual(Buffer.from('retry', 'utf8'));
 		expect(server.requests.filter((request) => request.method === 'GET')).toHaveLength(3);
