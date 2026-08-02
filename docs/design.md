@@ -34,7 +34,7 @@ The user-configured remote path is an exclusive plugin root:
 
 `manifest.json` contains the current format version, one lowercase UUID-v4 revision ID, and each file's relative path, SHA-256, and size.
 
-A push creates a complete new revision. When a current revision exists, the server clones it with `COPY`, then only changed files are uploaded and removed paths are deleted. The current manifest hash is rechecked before `manifest.json` is written last. A revision is not active until referenced by the manifest. After a verified commit, the previous current-format revision is removed. Failed cleanup or uncertain activation is surfaced in the current interaction. Explicit cleanup revalidates the manifest before deleting only recognized inactive plugin residue; unknown items are retained.
+A push creates a complete new revision. When a current revision exists, unchanged files are reused by copying their top-level files or directories under the new revision; only changed files are uploaded. The current manifest hash is rechecked before `manifest.json` is written last. A revision is not active until referenced by the manifest. After a verified commit, the previous current-format revision is removed. Failed cleanup or uncertain activation is surfaced in the current interaction. Explicit cleanup revalidates the manifest before deleting only recognized inactive plugin residue; unknown items are retained.
 
 If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. Push can overwrite it only after an explicit risk confirmation and never migrates or deletes its legacy data.
 
