@@ -12,7 +12,6 @@ import {
 	disposePullWorkspace,
 	listBackups,
 	planRestore,
-	sealPullWorkspace,
 	stageVerifiedFile,
 } from '../src/local-transaction.js';
 import { generateRevisionId, validateManifest, type ManifestFile } from '../src/manifest.js';
@@ -63,7 +62,6 @@ async function stageManifest(
 		}
 		await stageVerifiedFile(root, workspace, file, Buffer.from(fileContents, 'utf8'));
 	}
-	await sealPullWorkspace(root, workspace, manifest);
 	return workspace;
 }
 
@@ -335,7 +333,7 @@ describe('pull transaction', () => {
 		await writeFile(authPath, 'private', 'utf8');
 		await chmod(authPath, 0o644);
 		const manifest = createManifest([{ contents: 'private', path: 'auth.json' }]);
-		const workspace = await stageManifest(root, manifest, new Map([['auth.json', 'private']]));
+		const workspace = await createPullWorkspace(root);
 		const plan: PullPlan = {
 			actions: [
 				{
@@ -345,7 +343,7 @@ describe('pull transaction', () => {
 					source: source(manifest, 'auth.json'),
 				},
 			],
-			downloads: manifest.files,
+			downloads: [],
 			nextManagedPaths: manifest.files.map((file) => file.path),
 		};
 
@@ -409,7 +407,7 @@ describe('pull transaction', () => {
 		await disposePullWorkspace(root, workspace);
 	});
 
-	it('rejects a workspace changed after sealing before mutating active files', async () => {
+	it('rejects a changed workspace before mutating active files', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
 		temporaryDirectories.push(root);
 		const manifest = createManifest([{ contents: 'new settings', path: 'settings.json' }]);
@@ -437,7 +435,7 @@ describe('pull transaction', () => {
 		};
 
 		await expect(applyPullPlan(root, workspace, plan)).rejects.toThrow(
-			'Pull workspace does not match the manifest',
+			'Pull workspace does not match the download plan',
 		);
 		await expect(readFile(join(root, 'settings.json'), 'utf8')).rejects.toMatchObject({
 			code: 'ENOENT',

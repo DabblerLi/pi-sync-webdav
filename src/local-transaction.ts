@@ -2,8 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 
-import type { ManifestFile, ManifestV1 } from './manifest.js';
-import { MAX_FILE_BYTES, MAX_OPERATION_BYTES, validateManifest } from './manifest.js';
+import type { ManifestFile } from './manifest.js';
+import { MAX_FILE_BYTES, MAX_OPERATION_BYTES } from './manifest.js';
 import { getPrivatePaths, parseManifestPath, type SafeRelativePath } from './paths.js';
 import { throwIfOperationCancelled, type OperationOptions } from './operation.js';
 import { readRegularFileSnapshot } from './safe-files.js';
@@ -471,7 +471,7 @@ async function verifyWorkspaceFiles(
 		stagedFiles.length !== expected.size ||
 		stagedFiles.some((file) => expected.get(file.path) === undefined)
 	) {
-		throw new Error('Pull workspace does not match the manifest');
+		throw new Error('Pull workspace does not match the download plan');
 	}
 	for (const file of stagedFiles) {
 		throwIfOperationCancelled(operation?.signal);
@@ -481,7 +481,7 @@ async function verifyWorkspaceFiles(
 			file.size !== expectedFile.size ||
 			file.sha256 !== expectedFile.sha256
 		) {
-			throw new Error('Pull workspace does not match the manifest');
+			throw new Error('Pull workspace does not match the download plan');
 		}
 	}
 }
@@ -645,17 +645,6 @@ export async function stageVerifiedFile(
 	}
 	verifyContents(file, stagedContents);
 	throwIfOperationCancelled(operation?.signal);
-}
-
-export async function sealPullWorkspace(
-	agentRoot: string,
-	workspace: PullWorkspace,
-	manifest: ManifestV1,
-	operation?: OperationOptions,
-): Promise<void> {
-	throwIfOperationCancelled(operation?.signal);
-	const validatedManifest = validateManifest(manifest);
-	await verifyWorkspaceFiles(agentRoot, workspace, validatedManifest.files, operation);
 }
 
 export async function applyPullPlan(

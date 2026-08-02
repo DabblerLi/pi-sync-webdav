@@ -36,6 +36,11 @@ export interface WebDavRequestOptions {
 }
 
 export interface WebDavGateway {
+	copyPath(
+		source: RemotePath,
+		destination: RemotePath,
+		options?: WebDavRequestOptions,
+	): Promise<void>;
 	createDirectory(path: RemotePath, options?: WebDavRequestOptions): Promise<void>;
 	deletePath(path: RemotePath, options?: WebDavRequestOptions): Promise<void>;
 	directoryContents(
@@ -111,6 +116,12 @@ function toSafeRequestError(error: unknown): WebDavRequestError {
 		});
 	}
 	return new WebDavRequestError('WebDAV network request failed', { retryable: true });
+}
+
+function discardResponseBody(value: unknown): void {
+	if (isRecord(value) && value.body instanceof Readable) {
+		value.body.destroy();
+	}
 }
 
 function assertPositiveSafeInteger(value: number, name: string): void {
@@ -244,6 +255,45 @@ class SafeWebDavGateway implements WebDavGateway {
 		assertPositiveSafeInteger(this.#requestTimeoutMs, 'request timeout');
 		if (this.#retryDelaysMs.some((delay) => !Number.isSafeInteger(delay) || delay < 0)) {
 			throw new Error('Invalid retry delays');
+		}
+	}
+
+	async copyPath(
+		source: RemotePath,
+		destination: RemotePath,
+		options?: WebDavRequestOptions,
+	): Promise<void> {
+		const sourcePath = parseRemotePath(source);
+		const destinationPath = parseRemotePath(destination);
+		let response: Awaited<ReturnType<WebDAVClient['customRequest']>>;
+		try {
+			// An uncertain COPY may still complete remotely. Do not create multiple
+			// in-flight requests whose outcomes target the same revision.
+			response = await this.#executeOnce(
+				(signal) =>
+					this.#client.customRequest(sourcePath, {
+						headers: {
+							Depth: 'infinity',
+							Destination: new URL(encodeRemotePath(destinationPath), this.#baseUrl).toString(),
+							Overwrite: 'F',
+						},
+						method: 'COPY',
+						signal,
+					}),
+				options?.signal,
+			);
+		} catch (error: unknown) {
+			if (isRecord(error)) {
+				discardResponseBody(error.response);
+			}
+			throw toSafeRequestError(error);
+		}
+		discardResponseBody(response);
+		if (response.status !== 201 && response.status !== 204) {
+			throw new WebDavRequestError(`WebDAV COPY failed with HTTP status ${response.status}`, {
+				retryable: false,
+				status: response.status,
+			});
 		}
 	}
 

@@ -86,15 +86,6 @@ export class MockWebDavServer {
 		});
 	}
 
-	setFile(path: string, contents: Buffer): void {
-		const normalizedPath = normalizePath(path);
-		const parent = parentPath(normalizedPath);
-		if (this.#entries.get(parent)?.type !== 'directory') {
-			throw new Error('Parent directory does not exist');
-		}
-		this.#entries.set(normalizedPath, { contents, type: 'file' });
-	}
-
 	async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
 		const method = request.method ?? 'UNKNOWN';
 		const url = new URL(request.url ?? '/', this.baseUrl || 'http://127.0.0.1/dav/');
@@ -139,6 +130,9 @@ export class MockWebDavServer {
 		}
 
 		switch (method) {
+			case 'COPY':
+				this.#handleCopy(path, request, response);
+				return;
 			case 'PROPFIND':
 				this.#handlePropfind(path, request, response);
 				return;
@@ -157,6 +151,57 @@ export class MockWebDavServer {
 			default:
 				response.writeHead(405).end();
 		}
+	}
+
+	#handleCopy(path: string, request: IncomingMessage, response: ServerResponse): void {
+		const destinationHeader = request.headers.destination;
+		if (!this.#entries.has(path)) {
+			response.writeHead(404).end();
+			return;
+		}
+		if (
+			typeof destinationHeader !== 'string' ||
+			request.headers.depth !== 'infinity' ||
+			request.headers.overwrite !== 'F'
+		) {
+			response.writeHead(400).end();
+			return;
+		}
+		let destination: string;
+		try {
+			const url = new URL(destinationHeader, this.baseUrl);
+			if (url.origin !== new URL(this.baseUrl).origin || !url.pathname.startsWith('/dav/')) {
+				response.writeHead(502).end();
+				return;
+			}
+			destination = normalizePath(decodeURIComponent(url.pathname.slice('/dav/'.length)));
+		} catch {
+			response.writeHead(400).end();
+			return;
+		}
+		if (
+			destination.length === 0 ||
+			this.#entries.get(parentPath(destination))?.type !== 'directory'
+		) {
+			response.writeHead(409).end();
+			return;
+		}
+		if (this.#entries.has(destination)) {
+			response.writeHead(412).end();
+			return;
+		}
+
+		const copiedEntries = [...this.#entries].filter(
+			([candidate]) => candidate === path || candidate.startsWith(`${path}/`),
+		);
+		for (const [sourcePath, entry] of copiedEntries) {
+			const copiedPath = `${destination}${sourcePath.slice(path.length)}`;
+			this.#entries.set(
+				copiedPath,
+				entry.type === 'file' ? { contents: Buffer.from(entry.contents), type: 'file' } : entry,
+			);
+		}
+		response.writeHead(201).end();
 	}
 
 	#handlePropfind(path: string, request: IncomingMessage, response: ServerResponse): void {

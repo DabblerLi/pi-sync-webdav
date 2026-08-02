@@ -90,7 +90,7 @@ describe('push planning', () => {
 });
 
 describe('pull planning', () => {
-	it('downloads every manifest file and only deletes matching-connection managed files', async () => {
+	it('downloads changed files and only deletes matching-connection managed files', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-plan-');
 		temporaryDirectories.push(root);
 		await writeFile(join(root, 'settings.json'), 'same', 'utf8');
@@ -123,10 +123,7 @@ describe('pull planning', () => {
 			syncState: undefined,
 		});
 
-		expect(matchingPlan.downloads.map((file) => file.path)).toEqual([
-			'settings.json',
-			'themes/new.json',
-		]);
+		expect(matchingPlan.downloads.map((file) => file.path)).toEqual(['themes/new.json']);
 		expect(matchingPlan.actions.map((action) => [action.path, action.action])).toEqual([
 			['old.json', 'delete'],
 			['themes/new.json', 'add'],

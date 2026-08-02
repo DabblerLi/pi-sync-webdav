@@ -127,6 +127,7 @@ describe('sync command parsing', () => {
 		['  status  ', 'status'],
 		['diff', 'diff'],
 		['settings', 'settings'],
+		['cleanup', 'cleanup'],
 		['setup', undefined],
 		['settings now', undefined],
 		['unknown', undefined],
@@ -144,7 +145,7 @@ describe('sync command registration', () => {
 			{ label: 'push', value: 'push' },
 			{ label: 'pull', value: 'pull' },
 		]);
-		for (const command of ['settings', 'push', 'pull', 'restore']) {
+		for (const command of ['settings', 'push', 'pull', 'restore', 'cleanup']) {
 			const notify = vi.fn();
 			await registered.handler(command, {
 				mode: 'print',
@@ -329,6 +330,7 @@ describe('sync command registration', () => {
 			),
 		).toBe(false);
 		expect(server.requests.some((request) => request.pathname.includes('/revisions/'))).toBe(false);
+		expect(server.requests.filter((request) => request.method === 'PROPFIND')).toHaveLength(2);
 	});
 
 	it('does not alter saved configuration when connection validation fails', async () => {
@@ -471,6 +473,8 @@ describe('sync command registration', () => {
 				expect.objectContaining({ pathname: expect.stringContaining('/revisions/') }),
 			]),
 		);
+		expect(server.requests.filter((request) => request.method === 'PROPFIND')).toHaveLength(1);
+		expect(server.requests.filter((request) => request.method === 'GET')).toHaveLength(1);
 		expect(await readConfig(root)).toMatchObject({ connection: { password: 'password' } });
 	});
 
@@ -711,6 +715,7 @@ describe('sync command registration', () => {
 			{ type: 'complete' },
 		]);
 		const notify = vi.fn();
+		server.requests.splice(0);
 
 		await registered.handler('push', {
 			mode: 'tui',
@@ -722,6 +727,9 @@ describe('sync command registration', () => {
 		expect(await readConfig(root)).toMatchObject({
 			syncState: { managedPaths: [] },
 		});
+		expect(
+			server.requests.some((request) => request.pathname.includes('.pi-sync-webdav-probe-')),
+		).toBe(false);
 		expect(notify).toHaveBeenCalledWith('Configuration pushed.', 'info');
 	});
 
@@ -808,7 +816,7 @@ describe('sync command registration', () => {
 		expect(await readFile(join(root, 'settings.json'), 'utf8')).toBe('changed after planning');
 	});
 
-	it('cleans only verified remote residue from the dashboard after confirmation', async () => {
+	it('cleans only verified remote residue through the explicit command after confirmation', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
 		temporaryDirectories.push(root);
 		const server = await MockWebDavServer.create();
@@ -840,13 +848,12 @@ describe('sync command registration', () => {
 		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
 		const driver = createCustomDriver([
-			valueStep('Clean remote residue'),
 			{ type: 'complete' },
 			valueStep(true),
 			{ type: 'complete' },
 		]);
 
-		await registered.handler('', {
+		await registered.handler('cleanup', {
 			mode: 'tui',
 			ui: {
 				custom: driver.custom,
@@ -861,6 +868,40 @@ describe('sync command registration', () => {
 			pushInclude: [parsePushInclude('settings.json')],
 		});
 		expect(notify).toHaveBeenCalledWith('Remote residue cleaned.', 'info');
+	});
+
+	it('keeps remote cleanup out of the dashboard', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'pi-sync-webdav',
+			url: 'https://example.com/dav',
+			username: 'alice',
+		});
+		await writeConfig(root, {
+			connection: { ...connection, readOnly: false },
+			pushInclude: [],
+			version: 1,
+		});
+		const { command: registered } = registerTestCommand(root);
+		let dashboardLines: string[] = [];
+		const driver = createCustomDriver([
+			{
+				type: 'inspect',
+				onRender: (lines) => {
+					dashboardLines = lines;
+				},
+				value: 'Cancel',
+			},
+		]);
+
+		await registered.handler('', {
+			mode: 'tui',
+			ui: { custom: driver.custom, notify: vi.fn() },
+		} as unknown as ExtensionCommandContext);
+
+		expect(dashboardLines.join('\n')).not.toContain('Cleanup');
 	});
 
 	it('warns when adding sessions to the push selection for the first time', async () => {
@@ -1007,7 +1048,6 @@ describe('sync command registration', () => {
 		expect(dashboardText).toContain('Pull');
 		expect(dashboardText).toContain('Cancel');
 		expect(dashboardText).not.toContain('Push');
-		expect(dashboardText).not.toContain('Clean remote residue');
 
 		await registered.handler('push', {
 			mode: 'tui',

@@ -22,7 +22,12 @@ import {
 	type RemotePath,
 	type SafeRelativePath,
 } from './paths.js';
-import { WebDavRequestError, type WebDavGateway, type WebDavRequestOptions } from './webdav.js';
+import {
+	WebDavRequestError,
+	type RemoteDirectoryEntry,
+	type WebDavGateway,
+	type WebDavRequestOptions,
+} from './webdav.js';
 
 const MANIFEST_FILE_NAME = 'manifest.json';
 const REVISIONS_DIRECTORY_NAME = 'revisions';
@@ -81,9 +86,8 @@ export interface PublishRevisionResult {
 	readonly previousRevisionCleanup: 'deleted' | 'failed' | 'not-applicable' | 'retained';
 }
 
-export interface WriteCapabilityResult {
+interface WriteCapabilityResult {
 	readonly canWrite: boolean;
-	readonly error: WebDavRequestError | undefined;
 	readonly cleanupFailed: boolean;
 }
 
@@ -189,17 +193,71 @@ function decodeManifest(bytes: Buffer): ManifestV1 {
 	}
 }
 
-function toSafeRequestError(error: unknown): WebDavRequestError {
-	if (error instanceof WebDavRequestError) {
-		return error;
-	}
-	return new WebDavRequestError('WebDAV write capability check failed', { retryable: false });
-}
-
 function assertExpectedManifestHash(value: string | undefined): void {
 	if (value !== undefined && !SHA256_PATTERN.test(value)) {
 		throw new Error('Invalid expected manifest hash');
 	}
+}
+
+function classifyRootEntries(entries: readonly RemoteDirectoryEntry[]): RemoteRootInspection {
+	if (entries.some((entry) => entry.basename === MANIFEST_FILE_NAME && entry.type === 'file')) {
+		return { kind: 'managed' };
+	}
+	const containsOnlyProbes = entries.every(
+		(entry) => entry.type === 'directory' && PROBE_DIRECTORY_NAME_PATTERN.test(entry.basename),
+	);
+	return { kind: containsOnlyProbes ? 'empty' : 'foreign' };
+}
+
+function manifestDirectories(manifest: ManifestV1): readonly SafeRelativePath[] {
+	const directories = new Set<SafeRelativePath>();
+	for (const file of manifest.files) {
+		const segments = file.path.split('/');
+		segments.pop();
+		for (let depth = 1; depth <= segments.length; depth += 1) {
+			directories.add(parseManifestPath(segments.slice(0, depth).join('/')));
+		}
+	}
+	return [...directories].sort((left, right) => left.split('/').length - right.split('/').length);
+}
+
+function planClonedRevisionChanges(
+	previousManifest: ManifestV1,
+	nextManifest: ManifestV1,
+): {
+	readonly deletionPaths: readonly SafeRelativePath[];
+	readonly directoriesToCreate: readonly SafeRelativePath[];
+} {
+	const previousDirectories = manifestDirectories(previousManifest);
+	const nextDirectories = manifestDirectories(nextManifest);
+	const nextDirectorySet = new Set(nextDirectories);
+	const nextPaths = new Set(nextManifest.files.map((file) => file.path));
+	const candidates = new Set<SafeRelativePath>();
+	for (const previousFile of previousManifest.files) {
+		if (nextPaths.has(previousFile.path)) {
+			continue;
+		}
+		candidates.add(previousFile.path);
+	}
+	for (const directory of previousDirectories) {
+		if (!nextDirectorySet.has(directory)) {
+			candidates.add(directory);
+		}
+	}
+
+	const sorted = [...candidates].sort(
+		(left, right) => left.split('/').length - right.split('/').length,
+	);
+	const deletionPaths = sorted.filter(
+		(path, index) => !sorted.slice(0, index).some((parent) => path.startsWith(`${parent}/`)),
+	);
+	const previousDirectorySet = new Set(previousDirectories);
+	return {
+		deletionPaths,
+		directoriesToCreate: nextDirectories.filter(
+			(directory) => !previousDirectorySet.has(directory),
+		),
+	};
 }
 
 export class RemoteStore {
@@ -215,20 +273,16 @@ export class RemoteStore {
 		throwIfCancelled(options);
 		reportProgress(options, { phase: 'validating' });
 		throwIfCancelled(options);
-		if (!(await this.#gateway.exists(this.#remoteRoot, requestOptions(options)))) {
-			return { kind: 'missing' };
+		try {
+			return classifyRootEntries(
+				await this.#gateway.directoryContents(this.#remoteRoot, requestOptions(options)),
+			);
+		} catch (error: unknown) {
+			if (error instanceof WebDavRequestError && error.status === 404) {
+				return { kind: 'missing' };
+			}
+			throw error;
 		}
-		const entries = await this.#gateway.directoryContents(
-			this.#remoteRoot,
-			requestOptions(options),
-		);
-		if (entries.some((entry) => entry.basename === MANIFEST_FILE_NAME && entry.type === 'file')) {
-			return { kind: 'managed' };
-		}
-		const containsOnlyProbes = entries.every(
-			(entry) => entry.type === 'directory' && PROBE_DIRECTORY_NAME_PATTERN.test(entry.basename),
-		);
-		return { kind: containsOnlyProbes ? 'empty' : 'foreign' };
 	}
 
 	async ensureRoot(options?: RemoteOperationOptions): Promise<RemoteRootInspection> {
@@ -240,7 +294,9 @@ export class RemoteStore {
 				await this.#gateway.createDirectory(path, requestOptions(options));
 			}
 		}
-		return this.inspectRoot(options);
+		return classifyRootEntries(
+			await this.#gateway.directoryContents(this.#remoteRoot, requestOptions(options)),
+		);
 	}
 
 	async readRawManifest(
@@ -273,14 +329,6 @@ export class RemoteStore {
 			...rawManifest,
 			manifest: decodeManifest(rawManifest.bytes),
 		};
-	}
-
-	async verifyReadCapability(options?: RemoteOperationOptions): Promise<void> {
-		throwIfCancelled(options);
-		if (await this.#gateway.exists(this.#remoteRoot, requestOptions(options))) {
-			await this.#gateway.directoryContents(this.#remoteRoot, requestOptions(options));
-		}
-		await this.readRawManifest(options);
 	}
 
 	async readRevisionFile(
@@ -332,7 +380,7 @@ export class RemoteStore {
 			probeFileMayExist = false;
 			await this.#gateway.deletePath(probeDirectory, requestOptions(options));
 			probeDirectoryMayExist = false;
-			return { canWrite: true, cleanupFailed: false, error: undefined };
+			return { canWrite: true, cleanupFailed: false };
 		} catch (error: unknown) {
 			if (probeFileMayExist) {
 				cleanupFailed = !(await this.#deleteProbePath(probeFile, cleanupOptions(options)));
@@ -344,7 +392,10 @@ export class RemoteStore {
 			if (options?.signal?.aborted) {
 				throw new WriteCapabilityProbeCancelledError(cleanupFailed);
 			}
-			return { canWrite: false, cleanupFailed, error: toSafeRequestError(error) };
+			if (!(error instanceof WebDavRequestError)) {
+				throw error;
+			}
+			return { canWrite: false, cleanupFailed };
 		}
 	}
 
@@ -353,12 +404,13 @@ export class RemoteStore {
 		options?: RemoteOperationOptions,
 	): Promise<PublishRevisionResult> {
 		assertExpectedManifestHash(input.expectedManifestSha256);
-		const inspection = await this.ensureRoot(options);
-		if (inspection.kind === 'foreign') {
-			throw new Error('The remote root contains unrecognized files');
-		}
-
 		const currentManifest = await this.readRawManifest(options);
+		if (currentManifest === undefined) {
+			const inspection = await this.ensureRoot(options);
+			if (inspection.kind === 'foreign') {
+				throw new Error('The remote root contains unrecognized files');
+			}
+		}
 		if (currentManifest?.sha256 !== input.expectedManifestSha256) {
 			throw new RemoteManifestChangedError();
 		}
@@ -375,11 +427,16 @@ export class RemoteStore {
 		}
 
 		const revision = generateRevisionId();
+		const preparedFiles = input.files.map((file) => ({
+			...file,
+			sha256: sha256(file.contents),
+			size: file.contents.byteLength,
+		}));
 		const manifest = validateManifest({
-			files: input.files.map((file) => ({
+			files: preparedFiles.map((file) => ({
 				path: file.path,
-				sha256: sha256(file.contents),
-				size: file.contents.byteLength,
+				sha256: file.sha256,
+				size: file.size,
 			})),
 			revision,
 			version: 1,
@@ -387,13 +444,24 @@ export class RemoteStore {
 		const manifestBytes = Buffer.from(serializeManifest(manifest), 'utf8');
 		const manifestSha256 = sha256(manifestBytes);
 		const revisionPath = this.#revisionPath(revision);
+		const previousFiles = new Map(previousManifest?.files.map((file) => [file.path, file]) ?? []);
+		const filesToUpload = preparedFiles.filter((file) => {
+			const previous = previousFiles.get(file.path);
+			return (
+				previous === undefined || previous.sha256 !== file.sha256 || previous.size !== file.size
+			);
+		});
 		let manifestWriteStarted = false;
 		let manifestWriteCompleted = false;
 
 		try {
-			await this.#ensureRevisionDirectory(revisionPath, manifest, options);
+			if (previousManifest === undefined) {
+				await this.#ensureRevisionDirectory(revisionPath, manifest, options);
+			} else {
+				await this.#cloneRevision(previousManifest, revisionPath, manifest, options);
+			}
 			let completedUploads = 0;
-			await mapConcurrent(input.files, FILE_OPERATION_CONCURRENCY, async (file, index) => {
+			await mapConcurrent(filesToUpload, FILE_OPERATION_CONCURRENCY, async (file) => {
 				throwIfCancelled(options);
 				const remoteFile = remoteChild(revisionPath, file.path);
 				await this.#gateway.writeFile(
@@ -407,16 +475,12 @@ export class RemoteStore {
 					undefined,
 					requestOptions(options),
 				);
-				const expectedFile = manifest.files[index];
-				if (expectedFile === undefined) {
-					throw new Error('Missing revision file metadata');
-				}
-				assertRevisionFileIntegrity(expectedFile, uploadedContents);
+				assertRevisionFileIntegrity(file, uploadedContents);
 				completedUploads += 1;
 				reportProgress(options, {
 					completed: completedUploads,
 					phase: 'uploading',
-					total: input.files.length,
+					total: filesToUpload.length,
 				});
 			});
 
@@ -440,7 +504,6 @@ export class RemoteStore {
 
 			const previousRevisionCleanup = await this.#cleanupPreviousRevision(
 				previousManifest,
-				revision,
 				options,
 			);
 			return { manifest, previousRevisionCleanup };
@@ -452,7 +515,6 @@ export class RemoteStore {
 					if (isExpectedManifest(committedManifest, manifestBytes, manifestSha256)) {
 						const previousRevisionCleanup = await this.#cleanupPreviousRevision(
 							previousManifest,
-							revision,
 							cleanup,
 						);
 						return { manifest, previousRevisionCleanup };
@@ -473,13 +535,18 @@ export class RemoteStore {
 
 	async inspectResidue(options?: RemoteOperationOptions): Promise<RemoteResidueReport> {
 		throwIfCancelled(options);
-		if (!(await this.#gateway.exists(this.#remoteRoot, requestOptions(options)))) {
-			return { candidates: [], unknownCount: 0 };
+		let rootEntries: readonly RemoteDirectoryEntry[];
+		try {
+			rootEntries = await this.#gateway.directoryContents(
+				this.#remoteRoot,
+				requestOptions(options),
+			);
+		} catch (error: unknown) {
+			if (error instanceof WebDavRequestError && error.status === 404) {
+				return { candidates: [], unknownCount: 0 };
+			}
+			throw error;
 		}
-		const rootEntries = await this.#gateway.directoryContents(
-			this.#remoteRoot,
-			requestOptions(options),
-		);
 		const manifestEntry = rootEntries.find(
 			(entry) => entry.basename === MANIFEST_FILE_NAME && entry.type === 'file',
 		);
@@ -626,18 +693,32 @@ export class RemoteStore {
 			await this.#gateway.createDirectory(revisionsDirectory, requestOptions(options));
 		}
 		await this.#gateway.createDirectory(revisionPath, requestOptions(options));
-
-		const directories = new Set<string>();
-		for (const file of manifest.files) {
-			const segments = file.path.split('/');
-			segments.pop();
-			for (let depth = 1; depth <= segments.length; depth += 1) {
-				directories.add(segments.slice(0, depth).join('/'));
-			}
+		for (const directory of manifestDirectories(manifest)) {
+			throwIfCancelled(options);
+			await this.#gateway.createDirectory(
+				remoteChild(revisionPath, directory),
+				requestOptions(options),
+			);
 		}
-		for (const directory of [...directories].sort(
-			(left, right) => left.split('/').length - right.split('/').length,
-		)) {
+	}
+
+	async #cloneRevision(
+		previousManifest: ManifestV1,
+		revisionPath: RemotePath,
+		manifest: ManifestV1,
+		options?: RemoteOperationOptions,
+	): Promise<void> {
+		await this.#gateway.copyPath(
+			this.#revisionPath(previousManifest.revision),
+			revisionPath,
+			requestOptions(options),
+		);
+		const changes = planClonedRevisionChanges(previousManifest, manifest);
+		await mapConcurrent(changes.deletionPaths, FILE_OPERATION_CONCURRENCY, (path) =>
+			this.#gateway.deletePath(remoteChild(revisionPath, path), requestOptions(options)),
+		);
+
+		for (const directory of changes.directoriesToCreate) {
 			throwIfCancelled(options);
 			await this.#gateway.createDirectory(
 				remoteChild(revisionPath, directory),
@@ -648,10 +729,9 @@ export class RemoteStore {
 
 	async #cleanupPreviousRevision(
 		previousManifest: ManifestV1 | undefined,
-		activeRevision: RevisionId,
 		options?: RemoteOperationOptions,
 	): Promise<PublishRevisionResult['previousRevisionCleanup']> {
-		if (previousManifest === undefined || previousManifest.revision === activeRevision) {
+		if (previousManifest === undefined) {
 			return 'not-applicable';
 		}
 		try {
@@ -685,11 +765,13 @@ export class RemoteStore {
 		if (currentManifest?.manifest.revision === revision) {
 			return false;
 		}
-		const revisionPath = this.#revisionPath(revision);
-		if (!(await this.#gateway.exists(revisionPath, requestOptions(options)))) {
-			return true;
+		try {
+			await this.#gateway.deletePath(this.#revisionPath(revision), requestOptions(options));
+		} catch (error: unknown) {
+			if (!(error instanceof WebDavRequestError && error.status === 404)) {
+				throw error;
+			}
 		}
-		await this.#gateway.deletePath(revisionPath, requestOptions(options));
 		return true;
 	}
 }

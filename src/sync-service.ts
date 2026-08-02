@@ -8,13 +8,13 @@ import {
 	FILE_OPERATION_CONCURRENCY,
 	isOperationCancelled,
 	mapConcurrent,
+	throwIfOperationCancelled,
 	type OperationOptions,
 } from './operation.js';
 import {
 	applyPullPlan,
 	createPullWorkspace,
 	disposePullWorkspace,
-	sealPullWorkspace,
 	stageVerifiedFile,
 	type ApplyResult,
 	type PullWorkspace,
@@ -319,7 +319,7 @@ export async function stagePreparedPull(
 				total: preparation.plan.downloads.length,
 			});
 		});
-		await sealPullWorkspace(agentRoot, activeWorkspace, preparation.manifest, operation);
+		throwIfOperationCancelled(operation?.signal);
 		return { preparation, workspace: activeWorkspace };
 	} catch (error: unknown) {
 		if (workspace === undefined) {

@@ -268,6 +268,7 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 	);
 
 	const actions: FileMutation[] = [];
+	const downloads: ManifestFile[] = [];
 	let observedLocalBytes = 0;
 	const observeAndCount = async (
 		path: SafeRelativePath,
@@ -296,6 +297,7 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 				path: file.path,
 				source: file,
 			});
+			downloads.push(file);
 			continue;
 		}
 		if (local.sha256 !== file.sha256 || local.size !== file.size) {
@@ -305,6 +307,7 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 				path: file.path,
 				source: file,
 			});
+			downloads.push(file);
 			continue;
 		}
 		if (
@@ -339,7 +342,7 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 
 	return {
 		actions: actions.sort((left, right) => comparePaths(left.path, right.path)),
-		downloads: [...manifest.files].sort((left, right) => comparePaths(left.path, right.path)),
+		downloads: downloads.sort((left, right) => comparePaths(left.path, right.path)),
 		nextManagedPaths: [...manifestPaths].sort(comparePaths),
 	};
 }

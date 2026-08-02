@@ -24,21 +24,25 @@ afterEach(async () => {
 async function createStore(remoteRoot = 'pi-sync-webdav') {
 	const server = await MockWebDavServer.create();
 	servers.push(server);
-	const gateway = createWebDavGateway(
-		normalizeConnection({
-			password: 'password',
-			remotePath: remoteRoot,
-			url: server.baseUrl,
-			username: 'alice',
-		}),
-		{ requestTimeoutMs: 1_000, retryDelaysMs: [] },
-	);
+	const connection = normalizeConnection({
+		password: 'password',
+		remotePath: remoteRoot,
+		url: server.baseUrl,
+		username: 'alice',
+	});
+	const gateway = createWebDavGateway(connection, {
+		requestTimeoutMs: 1_000,
+		retryDelaysMs: [],
+	});
 	const root = parseRemotePath(remoteRoot);
-	return { gateway, root, server, store: new RemoteStore(gateway, root) };
+	return { connection, gateway, root, server, store: new RemoteStore(gateway, root) };
 }
 
 function overrideGateway(gateway: WebDavGateway, overrides: Partial<WebDavGateway>): WebDavGateway {
 	return {
+		copyPath:
+			overrides.copyPath ??
+			((source, destination, options) => gateway.copyPath(source, destination, options)),
 		createDirectory:
 			overrides.createDirectory ?? ((path, options) => gateway.createDirectory(path, options)),
 		deletePath: overrides.deletePath ?? ((path, options) => gateway.deletePath(path, options)),
@@ -64,7 +68,6 @@ describe('remote store', () => {
 		expect(await store.verifyWriteCapability()).toEqual({
 			canWrite: true,
 			cleanupFailed: false,
-			error: undefined,
 		});
 		expect(await store.inspectRoot()).toEqual({ kind: 'empty' });
 		expect(root).toBe('pi/pi-sync-webdav');
@@ -87,13 +90,14 @@ describe('remote store', () => {
 		expect(await gateway.exists(parseRemotePath(`${root}/revisions`))).toBe(false);
 	});
 
-	it('publishes complete revisions, verifies the manifest, and removes the previous revision', async () => {
-		const { gateway, root, store } = await createStore();
+	it('clones the active revision, uploads only changes, and removes the previous revision', async () => {
+		const { gateway, root, server, store } = await createStore();
 		await store.ensureRoot();
 		const first = await store.publishRevision({
 			allowUnverifiedManifest: false,
 			expectedManifestSha256: undefined,
 			files: [
+				{ contents: Buffer.from('old', 'utf8'), path: parseManifestPath('removed.txt') },
 				{
 					contents: Buffer.from('{"theme":"dark"}', 'utf8'),
 					path: parseManifestPath('settings.json'),
@@ -112,6 +116,7 @@ describe('remote store', () => {
 				parseRemotePath(`${root}/revisions/${first.manifest.revision}/themes/dark.txt`),
 			),
 		).toEqual(Buffer.from('dark', 'utf8'));
+		server.requests.splice(0);
 
 		const second = await store.publishRevision({
 			allowUnverifiedManifest: false,
@@ -121,14 +126,165 @@ describe('remote store', () => {
 					contents: Buffer.from('{"theme":"light"}', 'utf8'),
 					path: parseManifestPath('settings.json'),
 				},
+				{ contents: Buffer.from('dark', 'utf8'), path: parseManifestPath('themes/dark.txt') },
 			],
 		});
 
+		const secondRevisionFragment = `/revisions/${second.manifest.revision}/`;
+		expect(server.requests.filter((request) => request.method === 'COPY')).toHaveLength(1);
+		expect(
+			server.requests.filter(
+				(request) => request.method === 'PUT' && request.pathname.includes(secondRevisionFragment),
+			),
+		).toEqual([expect.objectContaining({ pathname: expect.stringContaining('/settings.json') })]);
+		expect(
+			server.requests.some(
+				(request) => request.method === 'DELETE' && request.pathname.endsWith('/removed.txt'),
+			),
+		).toBe(true);
+		await expect(
+			gateway.readFile(
+				parseRemotePath(`${root}/revisions/${second.manifest.revision}/themes/dark.txt`),
+			),
+		).resolves.toEqual(Buffer.from('dark', 'utf8'));
 		expect(second.previousRevisionCleanup).toBe('deleted');
 		expect(
 			await gateway.exists(parseRemotePath(`${root}/revisions/${first.manifest.revision}`)),
 		).toBe(false);
 		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
+	});
+
+	it('leaves the active revision intact when collection COPY is unsupported', async () => {
+		const { gateway, root, server, store } = await createStore();
+		const first = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') }],
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		server.failNext('COPY', `${root}/revisions/${first.manifest.revision}`, 405);
+
+		await expect(
+			store.publishRevision({
+				allowUnverifiedManifest: false,
+				expectedManifestSha256: snapshot.sha256,
+				files: [{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') }],
+			}),
+		).rejects.toMatchObject({ status: 405 });
+		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
+		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toEqual([
+			{ basename: first.manifest.revision, type: 'directory' },
+		]);
+	});
+
+	it('removes a partially copied inactive revision after COPY failure', async () => {
+		const { gateway, root, store } = await createStore();
+		const first = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') }],
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		const failingGateway = overrideGateway(gateway, {
+			copyPath: async (source, destination, options) => {
+				await gateway.copyPath(source, destination, options);
+				throw new WebDavRequestError('WebDAV COPY failed with HTTP status 207', {
+					retryable: false,
+					status: 207,
+				});
+			},
+		});
+
+		await expect(
+			new RemoteStore(failingGateway, root).publishRevision({
+				allowUnverifiedManifest: false,
+				expectedManifestSha256: snapshot.sha256,
+				files: [{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') }],
+			}),
+		).rejects.toMatchObject({ status: 207 });
+		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
+		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toEqual([
+			{ basename: first.manifest.revision, type: 'directory' },
+		]);
+	});
+
+	it('rebuilds paths that change between files and directories', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('file'), path: parseManifestPath('extensions') },
+				{ contents: Buffer.from('nested'), path: parseManifestPath('themes/dark.json') },
+			],
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+
+		const published = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: snapshot.sha256,
+			files: [
+				{ contents: Buffer.from('nested'), path: parseManifestPath('extensions/config.json') },
+				{ contents: Buffer.from('file'), path: parseManifestPath('themes') },
+			],
+		});
+		const revisionRoot = `${root}/revisions/${published.manifest.revision}`;
+
+		await expect(
+			gateway.readFile(parseRemotePath(`${revisionRoot}/extensions/config.json`)),
+		).resolves.toEqual(Buffer.from('nested'));
+		await expect(gateway.readFile(parseRemotePath(`${revisionRoot}/themes`))).resolves.toEqual(
+			Buffer.from('file'),
+		);
+		expect(await gateway.directoryContents(parseRemotePath(revisionRoot))).toEqual([
+			{ basename: 'extensions', type: 'directory' },
+			{ basename: 'themes', type: 'file' },
+		]);
+	});
+
+	it('leaves a late COPY result inactive and available for residue cleanup', async () => {
+		const { connection, root, server, store } = await createStore();
+		const first = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') }],
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		server.delayNext('COPY', `${root}/revisions/${first.manifest.revision}`, 50);
+		const timeoutGateway = createWebDavGateway(connection, {
+			requestTimeoutMs: 10,
+			retryDelaysMs: [],
+		});
+
+		await expect(
+			new RemoteStore(timeoutGateway, root).publishRevision({
+				allowUnverifiedManifest: false,
+				expectedManifestSha256: snapshot.sha256,
+				files: [{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') }],
+			}),
+		).rejects.toThrow('WebDAV request timed out');
+		await delay(70);
+
+		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
+		const residue = await store.inspectResidue();
+		expect(residue.candidates).toHaveLength(1);
+		await expect(store.cleanupResidue(residue.candidates)).resolves.toMatchObject({
+			deleted: [residue.candidates[0]?.path],
+			failed: [],
+			retained: [],
+		});
 	});
 
 	it('uploads revision files with bounded concurrency', async () => {
@@ -415,28 +571,6 @@ describe('remote store', () => {
 		).toBe(true);
 	});
 
-	it('validates read capability independently from write probing', async () => {
-		const { gateway, root, store } = await createStore();
-		await store.ensureRoot();
-		const unreadableGateway = overrideGateway(gateway, {
-			readFile: async (path, onProgress, options) => {
-				if (path === parseRemotePath(`${root}/manifest.json`)) {
-					throw new WebDavRequestError('WebDAV authorization failed', {
-						retryable: false,
-						status: 403,
-					});
-				}
-				return gateway.readFile(path, onProgress, options);
-			},
-		});
-
-		await expect(
-			new RemoteStore(unreadableGateway, root).verifyReadCapability(),
-		).rejects.toMatchObject({
-			status: 403,
-		});
-	});
-
 	it('lists and safely cleans only recognized inactive revision and probe residue', async () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
@@ -614,8 +748,24 @@ describe('remote store', () => {
 		await expect(failingStore.verifyWriteCapability()).resolves.toEqual({
 			canWrite: false,
 			cleanupFailed: false,
-			error: expect.objectContaining({ status: 403 }),
 		});
+	});
+
+	it('does not hide unexpected capability probe failures as read-only access', async () => {
+		const { gateway, root, store } = await createStore();
+		await store.ensureRoot();
+		const failingGateway = overrideGateway(gateway, {
+			createDirectory: async (path, options) => {
+				if (path.includes('.pi-sync-webdav-probe-')) {
+					throw new Error('Unexpected probe failure');
+				}
+				await gateway.createDirectory(path, options);
+			},
+		});
+
+		await expect(new RemoteStore(failingGateway, root).verifyWriteCapability()).rejects.toThrow(
+			'Unexpected probe failure',
+		);
 	});
 
 	it('marks the connection read-only when probe writes are denied', async () => {
@@ -636,7 +786,6 @@ describe('remote store', () => {
 		await expect(new RemoteStore(failingGateway, root).verifyWriteCapability()).resolves.toEqual({
 			canWrite: false,
 			cleanupFailed: false,
-			error: expect.objectContaining({ status: 403 }),
 		});
 	});
 
@@ -656,7 +805,6 @@ describe('remote store', () => {
 		await expect(new RemoteStore(uncertainGateway, root).verifyWriteCapability()).resolves.toEqual({
 			canWrite: false,
 			cleanupFailed: false,
-			error: expect.objectContaining({ message: 'WebDAV network request failed' }),
 		});
 		expect(await store.inspectRoot()).toEqual({ kind: 'empty' });
 	});
@@ -712,7 +860,6 @@ describe('remote store', () => {
 		await expect(new RemoteStore(failingGateway, root).verifyWriteCapability()).resolves.toEqual({
 			canWrite: false,
 			cleanupFailed: true,
-			error: expect.objectContaining({ status: 403 }),
 		});
 	});
 });

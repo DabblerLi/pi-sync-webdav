@@ -3,7 +3,12 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import { SettingsManager } from '@earendil-works/pi-coding-agent';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { readConfig, writeConfig, type PluginConfig } from '../src/config.js';
+import {
+	connectionFingerprint,
+	readConfig,
+	writeConfig,
+	type PluginConfig,
+} from '../src/config.js';
 import {
 	getPrivatePaths,
 	parseManifestPath,
@@ -106,12 +111,13 @@ describe('sync service', () => {
 		).rejects.toThrow('Unverified remote manifest requires confirmation');
 	});
 
-	it('downloads only settings for package planning before staging the remaining revision files', async () => {
+	it('downloads package settings during planning and only changed files during staging', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
 		temporaryDirectories.push(root);
 		const { connection, server, store } = await createStore();
 		const config = pluginConfig(connection);
 		await writeFile(`${root}/settings.json`, '{}', 'utf8');
+		await writeFile(`${root}/AGENTS.md`, 'same', 'utf8');
 		await writeConfig(root, config);
 		await store.publishRevision({
 			allowUnverifiedManifest: false,
@@ -121,12 +127,17 @@ describe('sync service', () => {
 					contents: Buffer.from('{"theme":"remote"}', 'utf8'),
 					path: parseManifestPath('settings.json'),
 				},
+				{ contents: Buffer.from('same', 'utf8'), path: parseManifestPath('AGENTS.md') },
 				{ contents: Buffer.from('dark', 'utf8'), path: parseManifestPath('themes/dark.txt') },
 			],
 		});
 		server.requests.splice(0);
 
 		const preparation = await preparePull({ agentRoot: root, config, store });
+		expect(preparation.plan.downloads.map((file) => file.path)).toEqual([
+			'settings.json',
+			'themes/dark.txt',
+		]);
 		expect(
 			server.requests.some(
 				(request) => request.method === 'GET' && request.pathname.includes('themes/dark.txt'),
@@ -141,6 +152,11 @@ describe('sync service', () => {
 				(request) => request.method === 'GET' && request.pathname.includes('themes/dark.txt'),
 			),
 		).toBe(true);
+		expect(
+			server.requests.some(
+				(request) => request.method === 'GET' && request.pathname.includes('AGENTS.md'),
+			),
+		).toBe(false);
 		await discardStagedPull(root, staged);
 		await expect(
 			stat(`${getPrivatePaths(root).workspaceDirectory}/${staged.workspace.id}`),
@@ -172,6 +188,40 @@ describe('sync service', () => {
 		await expect(stat(`${root}/prompts`)).rejects.toMatchObject({ code: 'ENOENT' });
 	});
 
+	it('applies a managed remote deletion without downloading revision files', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
+		temporaryDirectories.push(root);
+		const { connection, server, store } = await createStore();
+		const config: PluginConfig = {
+			...pluginConfig(connection),
+			syncState: {
+				connectionFingerprint: connectionFingerprint(connection),
+				managedPaths: [parseManifestPath('old.json')],
+			},
+		};
+		await writeFile(`${root}/old.json`, 'old', 'utf8');
+		await writeConfig(root, config);
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [],
+		});
+
+		const preparation = await preparePull({ agentRoot: root, config, store });
+		expect(preparation.plan.actions.map((action) => [action.path, action.action])).toEqual([
+			['old.json', 'delete'],
+		]);
+		expect(preparation.plan.downloads).toEqual([]);
+		server.requests.splice(0);
+
+		await applyStagedPull(root, await stagePreparedPull(root, preparation));
+
+		expect(server.requests.some((request) => request.method === 'GET')).toBe(false);
+		await expect(stat(`${root}/old.json`)).rejects.toMatchObject({ code: 'ENOENT' });
+		expect(await readFile(`${root}/pi-sync-webdav/backups/old.json`, 'utf8')).toBe('old');
+		expect((await readConfig(root))?.syncState?.managedPaths).toEqual([]);
+	});
+
 	it('cleans a pull workspace when staging is cancelled', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
 		temporaryDirectories.push(root);
@@ -191,11 +241,13 @@ describe('sync service', () => {
 		});
 		const preparation = await preparePull({ agentRoot: root, config, store });
 		const controller = new AbortController();
-		controller.abort();
 
-		await expect(stagePreparedPull(root, preparation, controller.signal)).rejects.toThrow(
-			'Pull download cancelled',
-		);
+		await expect(
+			stagePreparedPull(root, preparation, {
+				onProgress: () => controller.abort(),
+				signal: controller.signal,
+			}),
+		).rejects.toThrow('Pull download cancelled');
 		await expect(stat(getPrivatePaths(root).workspaceDirectory)).rejects.toMatchObject({
 			code: 'ENOENT',
 		});

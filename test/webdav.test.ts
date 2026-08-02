@@ -34,14 +34,20 @@ describe('WebDAV gateway', () => {
 		const { gateway, server } = await createGateway();
 		const root = parseRemotePath('pi-sync-webdav');
 		const file = parseRemotePath('pi-sync-webdav/a b#.txt');
+		const copy = parseRemotePath('pi-sync-webdav-copy');
 
 		await gateway.createDirectory(root);
 		expect(await gateway.exists(root)).toBe(true);
 		await gateway.writeFile(file, Buffer.from('contents', 'utf8'));
 		expect(await gateway.readFile(file)).toEqual(Buffer.from('contents', 'utf8'));
 		expect(await gateway.directoryContents(root)).toEqual([{ basename: 'a b#.txt', type: 'file' }]);
+		await gateway.copyPath(root, copy);
+		expect(await gateway.readFile(parseRemotePath(`${copy}/a b#.txt`))).toEqual(
+			Buffer.from('contents', 'utf8'),
+		);
 		await gateway.deletePath(file);
 		await gateway.deletePath(root);
+		await gateway.deletePath(copy);
 		expect(await gateway.exists(root)).toBe(false);
 		expect(server.requests).toContainEqual({
 			method: 'PUT',
@@ -59,6 +65,34 @@ describe('WebDAV gateway', () => {
 
 		await expect(gateway.readFile(file)).resolves.toEqual(Buffer.from('retry', 'utf8'));
 		expect(server.requests.filter((request) => request.method === 'GET')).toHaveLength(2);
+	});
+
+	it('rejects a partial collection COPY response', async () => {
+		const { gateway, server } = await createGateway();
+		const source = parseRemotePath('copy-source');
+		const destination = parseRemotePath('copy-destination');
+		await gateway.createDirectory(source);
+		server.failNext('COPY', source, 207, 1, '<d:multistatus xmlns:d="DAV:"/>');
+
+		await expect(gateway.copyPath(source, destination)).rejects.toMatchObject({
+			message: 'WebDAV COPY failed with HTTP status 207',
+			retryable: false,
+			status: 207,
+		});
+	});
+
+	it('does not retry a COPY with an uncertain outcome', async () => {
+		const { gateway, server } = await createGateway();
+		const source = parseRemotePath('copy-source');
+		const destination = parseRemotePath('copy-destination');
+		await gateway.createDirectory(source);
+		server.failNext('COPY', source, 503);
+
+		await expect(gateway.copyPath(source, destination)).rejects.toMatchObject({
+			retryable: true,
+			status: 503,
+		});
+		expect(server.requests.filter((request) => request.method === 'COPY')).toHaveLength(1);
 	});
 
 	it('retries rate limits and timed-out requests', async () => {
