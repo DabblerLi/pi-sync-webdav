@@ -1,10 +1,16 @@
-# pi-sync-webdav
+<h1 align="center">pi-sync-webdav</h1>
 
-[English](README.md)
+<p align="center">
+  <a href="README.md">English</a>
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/pi-sync-webdav"><img alt="npm version" src="https://img.shields.io/npm/v/pi-sync-webdav?logo=npm" /></a>
+  <img alt="Node.js 22.19 or newer" src="https://img.shields.io/badge/Node.js-%3E%3D22.19.0-339933?logo=node.js&amp;logoColor=white" />
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
+</p>
 
 为 Pi Coding Agent 提供通过 Basic Auth WebDAV 同步单个配置目录的扩展。
-
-同步全部由你手动发起，每次只执行一个方向。没有后台同步、没有多目标路由，也没有可恢复的远端历史。
 
 ## 环境要求
 
@@ -51,18 +57,17 @@ pi update --extensions
 
 可在 **settings** 中修改选择范围，目录递归同步。选择范围只影响 `push`；`pull` 始终应用完整的远端文件集。
 
-永远不会同步：`npm/`、`git/`、`pi-sync-webdav/`、`logs/`、`node_modules/`。
+顶层的 `npm/`、`git/` 和 `pi-sync-webdav/` 不会同步；无论出现在什么层级，`logs/` 和 `node_modules/` 都会被忽略。
 
-`sessions/` 和 `auth.json` 默认不选中。将它们加入选择范围时需要额外确认。请把你选中的所有内容——尤其是 `auth.json`——当作敏感数据，只同步到你信任的远端。
+`sessions/` 和 `auth.json` 默认不选中。将它们加入选择范围时需要额外确认。注意将敏感数据只同步到你信任的远端。
 
-## 变更如何流转
+## 同步工作原理
 
 - **push** 把你当前选中的本地文件发布到专用远端文件夹。
 - **pull** 应用远端文件集，即使你本地的 push 选择范围不同。确认前请审阅计划的新增、更新和删除。
 - pull 在覆盖或删除受管本地文件前，会为该文件保留一份本地备份。
 - **restore** 在确认后重新应用这些本地文件备份。它不会恢复远端版本，也不会重新安装 Pi 扩展包。
 - 备份位于 Pi agent 目录下的 `pi-sync-webdav/backups/`，按文件原相对路径存放。备份保存的是最近一次 pull 中被覆盖或删除的文件：下一次产生本地变更的 pull 会整体替换这批备份，restore 也不会删除备份。如需清除，删除该文件夹或其中的单个文件即可。
-- 这不是远端备份历史服务：没有远端恢复命令。
 
 ## 远端访问与安全
 
@@ -74,10 +79,18 @@ pi update --extensions
 
 ## Pi 扩展包
 
-`settings.json` 可以声明 Pi 扩展包（即你用 `pi install` 安装的扩展）。pull 时，这些声明会转换为安装、更新或移除操作，与文件变更一起列出供你确认。扩展包的安装代码会以你的用户权限运行，因此只从信任的远端 pull。
+pull 检测到扩展包列表变化时，会把需要安装、更新或移除的包和文件变更一起列出，确认后统一处理。扩展包安装代码以你的用户权限运行，因此只从信任的远端 pull。
 
 如果文件已 pull 但扩展包操作失败或被取消，已拉取的文件会保留，你需要手动处理扩展包变更。
 
+## 贡献
+
+参见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## 许可证
 
-[MIT](LICENSE)。贡献方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+本项目采用 [MIT License](LICENSE)。
+
+## 致谢
+
+感谢 [LINUX DO](https://linux.do/) 社区。

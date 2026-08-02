@@ -1,10 +1,16 @@
-# pi-sync-webdav
+<h1 align="center">pi-sync-webdav</h1>
 
-[简体中文](README.zh-CN.md)
+<p align="center">
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/pi-sync-webdav"><img alt="npm version" src="https://img.shields.io/npm/v/pi-sync-webdav?logo=npm" /></a>
+  <img alt="Node.js 22.19 or newer" src="https://img.shields.io/badge/Node.js-%3E%3D22.19.0-339933?logo=node.js&amp;logoColor=white" />
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
+</p>
 
 A Pi Coding Agent extension that syncs one configuration directory to and from a WebDAV server using Basic Auth.
-
-Sync is manual and one direction at a time: you run `push` or `pull` yourself. There is no background sync, no multi-target routing, and no remote history to restore from.
 
 ## Requirements
 
@@ -51,9 +57,9 @@ Default push selection: `settings.json`, `keybindings.json`, `AGENTS.md`, `SYSTE
 
 Change the selection under **settings**. Directories sync recursively. The selection only affects `push`; `pull` always applies the full remote file set.
 
-Never synced: `npm/`, `git/`, `pi-sync-webdav/`, `logs/`, `node_modules/`.
+The top-level `npm/`, `git/`, and `pi-sync-webdav/` directories are never synced. `logs/` and `node_modules/` are ignored wherever they appear.
 
-`sessions/` and `auth.json` are off by default. Adding one to the selection asks for an extra confirmation. Treat everything you select—especially `auth.json`—as sensitive and only sync to a remote you trust.
+`sessions/` and `auth.json` are off by default. Adding one to the selection asks for an extra confirmation. Only sync sensitive data to a remote you trust.
 
 ## How sync works
 
@@ -62,7 +68,6 @@ Never synced: `npm/`, `git/`, `pi-sync-webdav/`, `logs/`, `node_modules/`.
 - Before pull replaces or removes a managed local file, it keeps a local backup of that file.
 - **restore** reapplies those local file backups after confirmation. It does not restore a remote version and does not reinstall Pi packages.
 - Backups live in `pi-sync-webdav/backups/` inside the Pi agent directory and mirror each file's original relative path. They hold the files replaced or removed by the most recent pull: the next pull that changes local files replaces the whole set, and restore leaves backups in place. To clear backups, delete that folder or single files inside it.
-- This is not a remote backup-history service: there is no remote restore command.
 
 ## Remote access and safety
 
@@ -74,10 +79,18 @@ Never synced: `npm/`, `git/`, `pi-sync-webdav/`, `logs/`, `node_modules/`.
 
 ## Pi packages
 
-`settings.json` can declare Pi packages (the extensions you install with `pi install`). During pull, those declarations are turned into install, update, or remove operations and shown for confirmation alongside file changes. Package install code runs with your user permissions, so pull only from a remote you trust.
+When pull detects changes to the package list, it shows any installs, updates, or removals alongside the file changes and applies them after confirmation. Package install code runs with your user permissions, so only pull from a remote you trust.
 
 If a package operation fails or is cancelled after files were pulled, the pulled files stay and you must resolve the package change manually.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
-[MIT](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
+This project is licensed under the [MIT License](LICENSE).
+
+## Acknowledgements
+
+Thanks to the [LINUX DO](https://linux.do/) community.
