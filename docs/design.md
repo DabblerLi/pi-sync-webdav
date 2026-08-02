@@ -64,4 +64,4 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 ## Verification
 
 - Unit and integration tests use Vitest. The fixture is an in-process `node:http` Basic Auth WebDAV server; Docker and vendor-specific CI are intentionally excluded.
-- CI runs the full check matrix on Ubuntu (Node 22 and 24) and type/unit checks on macOS and Windows; see [.github/workflows/ci.yml](.github/workflows/ci.yml).
+- CI runs tests on Ubuntu (Node 22 and 24), macOS, and Windows; static and package checks run once on Ubuntu with Node 24. Tag publishing requires the same commit to have passed CI on `main`; see [.github/workflows](../.github/workflows).
