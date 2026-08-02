@@ -147,6 +147,31 @@ describe('sync service', () => {
 		).rejects.toMatchObject({ code: 'ENOENT' });
 	});
 
+	it('does not create an empty default directory absent from the manifest', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
+		temporaryDirectories.push(root);
+		const { connection, store } = await createStore();
+		const config = pluginConfig(connection);
+		await writeFile(`${root}/settings.json`, '{}', 'utf8');
+		await writeConfig(root, config);
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{
+					contents: Buffer.from('{"theme":"remote"}', 'utf8'),
+					path: parseManifestPath('settings.json'),
+				},
+			],
+		});
+
+		const preparation = await preparePull({ agentRoot: root, config, store });
+		const staged = await stagePreparedPull(root, preparation);
+		await applyStagedPull(root, staged);
+
+		await expect(stat(`${root}/prompts`)).rejects.toMatchObject({ code: 'ENOENT' });
+	});
+
 	it('cleans a pull workspace when staging is cancelled', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
 		temporaryDirectories.push(root);
