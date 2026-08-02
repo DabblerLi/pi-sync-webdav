@@ -86,11 +86,12 @@ describe('WebDAV gateway', () => {
 		const source = parseRemotePath('copy-source');
 		const destination = parseRemotePath('copy-destination');
 		await gateway.createDirectory(source);
-		server.failNext('COPY', source, 503);
+		server.failNext('COPY', source, 500);
 
 		await expect(gateway.copyPath(source, destination)).rejects.toMatchObject({
+			message: 'WebDAV COPY failed with HTTP status 500',
 			retryable: true,
-			status: 503,
+			status: 500,
 		});
 		expect(server.requests.filter((request) => request.method === 'COPY')).toHaveLength(1);
 	});

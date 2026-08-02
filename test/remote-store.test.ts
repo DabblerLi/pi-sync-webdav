@@ -90,19 +90,25 @@ describe('remote store', () => {
 		expect(await gateway.exists(parseRemotePath(`${root}/revisions`))).toBe(false);
 	});
 
-	it('clones the active revision, uploads only changes, and removes the previous revision', async () => {
+	it('reuses unchanged top-level entries, uploads only changes, and removes the previous revision', async () => {
 		const { gateway, root, server, store } = await createStore();
 		await store.ensureRoot();
 		const first = await store.publishRevision({
 			allowUnverifiedManifest: false,
 			expectedManifestSha256: undefined,
 			files: [
+				{ contents: Buffer.from('agents', 'utf8'), path: parseManifestPath('AGENTS.md') },
+				{
+					contents: Buffer.from('old extension', 'utf8'),
+					path: parseManifestPath('extensions/config.json'),
+				},
 				{ contents: Buffer.from('old', 'utf8'), path: parseManifestPath('removed.txt') },
 				{
 					contents: Buffer.from('{"theme":"dark"}', 'utf8'),
 					path: parseManifestPath('settings.json'),
 				},
 				{ contents: Buffer.from('dark', 'utf8'), path: parseManifestPath('themes/dark.txt') },
+				{ contents: Buffer.from('old', 'utf8'), path: parseManifestPath('themes/removed.txt') },
 			],
 		});
 		const firstSnapshot = await store.readManifest();
@@ -117,11 +123,23 @@ describe('remote store', () => {
 			),
 		).toEqual(Buffer.from('dark', 'utf8'));
 		server.requests.splice(0);
+		const copiedPaths: Array<{ destination: string; source: string }> = [];
+		const recordingGateway = overrideGateway(gateway, {
+			copyPath: async (source, destination, options) => {
+				copiedPaths.push({ destination, source });
+				await gateway.copyPath(source, destination, options);
+			},
+		});
 
-		const second = await store.publishRevision({
+		const second = await new RemoteStore(recordingGateway, root).publishRevision({
 			allowUnverifiedManifest: false,
 			expectedManifestSha256: firstSnapshot.sha256,
 			files: [
+				{ contents: Buffer.from('agents', 'utf8'), path: parseManifestPath('AGENTS.md') },
+				{
+					contents: Buffer.from('new extension', 'utf8'),
+					path: parseManifestPath('extensions/config.json'),
+				},
 				{
 					contents: Buffer.from('{"theme":"light"}', 'utf8'),
 					path: parseManifestPath('settings.json'),
@@ -131,15 +149,34 @@ describe('remote store', () => {
 		});
 
 		const secondRevisionFragment = `/revisions/${second.manifest.revision}/`;
-		expect(server.requests.filter((request) => request.method === 'COPY')).toHaveLength(1);
+		expect(copiedPaths).toEqual([
+			{
+				destination: `${root}/revisions/${second.manifest.revision}/AGENTS.md`,
+				source: `${root}/revisions/${first.manifest.revision}/AGENTS.md`,
+			},
+			{
+				destination: `${root}/revisions/${second.manifest.revision}/themes`,
+				source: `${root}/revisions/${first.manifest.revision}/themes`,
+			},
+		]);
 		expect(
-			server.requests.filter(
-				(request) => request.method === 'PUT' && request.pathname.includes(secondRevisionFragment),
-			),
-		).toEqual([expect.objectContaining({ pathname: expect.stringContaining('/settings.json') })]);
+			server.requests
+				.filter(
+					(request) =>
+						request.method === 'PUT' && request.pathname.includes(secondRevisionFragment),
+				)
+				.map((request) => request.pathname)
+				.sort(),
+		).toEqual([
+			`/dav/${root}/revisions/${second.manifest.revision}/extensions/config.json`,
+			`/dav/${root}/revisions/${second.manifest.revision}/settings.json`,
+		]);
 		expect(
 			server.requests.some(
-				(request) => request.method === 'DELETE' && request.pathname.endsWith('/removed.txt'),
+				(request) =>
+					request.method === 'DELETE' &&
+					request.pathname ===
+						`/dav/${root}/revisions/${second.manifest.revision}/themes/removed.txt`,
 			),
 		).toBe(true);
 		await expect(
@@ -154,24 +191,30 @@ describe('remote store', () => {
 		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
 	});
 
-	it('leaves the active revision intact when collection COPY is unsupported', async () => {
+	it('leaves the active revision intact when a top-level COPY is unsupported', async () => {
 		const { gateway, root, server, store } = await createStore();
 		const first = await store.publishRevision({
 			allowUnverifiedManifest: false,
 			expectedManifestSha256: undefined,
-			files: [{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') }],
+			files: [
+				{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') },
+				{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+			],
 		});
 		const snapshot = await store.readManifest();
 		if (snapshot === undefined) {
 			throw new Error('Expected a manifest after publishing');
 		}
-		server.failNext('COPY', `${root}/revisions/${first.manifest.revision}`, 405);
+		server.failNext('COPY', `${root}/revisions/${first.manifest.revision}/themes`, 405);
 
 		await expect(
 			store.publishRevision({
 				allowUnverifiedManifest: false,
 				expectedManifestSha256: snapshot.sha256,
-				files: [{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') }],
+				files: [
+					{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') },
+					{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+				],
 			}),
 		).rejects.toMatchObject({ status: 405 });
 		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
@@ -185,7 +228,10 @@ describe('remote store', () => {
 		const first = await store.publishRevision({
 			allowUnverifiedManifest: false,
 			expectedManifestSha256: undefined,
-			files: [{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') }],
+			files: [
+				{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') },
+				{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+			],
 		});
 		const snapshot = await store.readManifest();
 		if (snapshot === undefined) {
@@ -205,7 +251,10 @@ describe('remote store', () => {
 			new RemoteStore(failingGateway, root).publishRevision({
 				allowUnverifiedManifest: false,
 				expectedManifestSha256: snapshot.sha256,
-				files: [{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') }],
+				files: [
+					{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') },
+					{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+				],
 			}),
 		).rejects.toMatchObject({ status: 207 });
 		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
@@ -215,7 +264,7 @@ describe('remote store', () => {
 	});
 
 	it('rebuilds paths that change between files and directories', async () => {
-		const { gateway, root, store } = await createStore();
+		const { gateway, root, server, store } = await createStore();
 		await store.publishRevision({
 			allowUnverifiedManifest: false,
 			expectedManifestSha256: undefined,
@@ -228,6 +277,7 @@ describe('remote store', () => {
 		if (snapshot === undefined) {
 			throw new Error('Expected a manifest after publishing');
 		}
+		server.requests.splice(0);
 
 		const published = await store.publishRevision({
 			allowUnverifiedManifest: false,
@@ -249,9 +299,53 @@ describe('remote store', () => {
 			{ basename: 'extensions', type: 'directory' },
 			{ basename: 'themes', type: 'file' },
 		]);
+		expect(server.requests.filter((request) => request.method === 'COPY')).toEqual([]);
 	});
 
-	it('leaves a late COPY result inactive and available for residue cleanup', async () => {
+	it('rebuilds nested paths inside a copied top-level directory', async () => {
+		const { gateway, root, server, store } = await createStore();
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('same'), path: parseManifestPath('shared/anchor.txt') },
+				{ contents: Buffer.from('file'), path: parseManifestPath('shared/file-to-dir') },
+				{
+					contents: Buffer.from('nested'),
+					path: parseManifestPath('shared/dir-to-file/value.txt'),
+				},
+			],
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		server.requests.splice(0);
+
+		const published = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: snapshot.sha256,
+			files: [
+				{ contents: Buffer.from('same'), path: parseManifestPath('shared/anchor.txt') },
+				{
+					contents: Buffer.from('nested'),
+					path: parseManifestPath('shared/file-to-dir/value.txt'),
+				},
+				{ contents: Buffer.from('file'), path: parseManifestPath('shared/dir-to-file') },
+			],
+		});
+		const revisionRoot = `${root}/revisions/${published.manifest.revision}`;
+
+		await expect(
+			gateway.readFile(parseRemotePath(`${revisionRoot}/shared/file-to-dir/value.txt`)),
+		).resolves.toEqual(Buffer.from('nested'));
+		await expect(
+			gateway.readFile(parseRemotePath(`${revisionRoot}/shared/dir-to-file`)),
+		).resolves.toEqual(Buffer.from('file'));
+		expect(server.requests.filter((request) => request.method === 'COPY')).toHaveLength(1);
+	});
+
+	it('leaves a late top-level COPY result inactive and available for residue cleanup', async () => {
 		const { gateway, root, store } = await createStore();
 		const first = await store.publishRevision({
 			allowUnverifiedManifest: false,
@@ -266,9 +360,13 @@ describe('remote store', () => {
 		let delayedCopy: Promise<void> | undefined;
 		const timeoutGateway = overrideGateway(gateway, {
 			copyPath: async (source, destination, options) => {
-				delayedCopy = copyRelease.promise.then(() =>
-					gateway.copyPath(source, destination, options),
-				);
+				const destinationSegments = destination.split('/');
+				destinationSegments.pop();
+				const destinationRevision = parseRemotePath(destinationSegments.join('/'));
+				delayedCopy = copyRelease.promise.then(async () => {
+					await gateway.createDirectory(destinationRevision, options);
+					await gateway.copyPath(source, destination, options);
+				});
 				throw new WebDavRequestError('WebDAV request timed out', { retryable: true });
 			},
 		});
@@ -277,7 +375,7 @@ describe('remote store', () => {
 			new RemoteStore(timeoutGateway, root).publishRevision({
 				allowUnverifiedManifest: false,
 				expectedManifestSha256: snapshot.sha256,
-				files: [{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') }],
+				files: [{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') }],
 			}),
 		).rejects.toThrow('WebDAV request timed out');
 		if (delayedCopy === undefined) {

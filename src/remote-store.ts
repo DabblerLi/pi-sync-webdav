@@ -221,10 +221,15 @@ function manifestDirectories(manifest: ManifestV1): readonly SafeRelativePath[] 
 	return [...directories].sort((left, right) => left.split('/').length - right.split('/').length);
 }
 
-function planClonedRevisionChanges(
+function topLevelPath(path: SafeRelativePath): SafeRelativePath {
+	return parseManifestPath(path.split('/')[0]);
+}
+
+function planRevisionReuse(
 	previousManifest: ManifestV1,
 	nextManifest: ManifestV1,
 ): {
+	readonly copyPaths: readonly SafeRelativePath[];
 	readonly deletionPaths: readonly SafeRelativePath[];
 	readonly directoriesToCreate: readonly SafeRelativePath[];
 } {
@@ -232,31 +237,48 @@ function planClonedRevisionChanges(
 	const nextDirectories = manifestDirectories(nextManifest);
 	const nextDirectorySet = new Set(nextDirectories);
 	const nextPaths = new Set(nextManifest.files.map((file) => file.path));
+	const previousFiles = new Map(previousManifest.files.map((file) => [file.path, file]));
+	const copyPathSet = new Set<SafeRelativePath>();
+	for (const file of nextManifest.files) {
+		const previous = previousFiles.get(file.path);
+		if (previous?.sha256 === file.sha256 && previous.size === file.size) {
+			copyPathSet.add(topLevelPath(file.path));
+		}
+	}
+
 	const candidates = new Set<SafeRelativePath>();
 	for (const previousFile of previousManifest.files) {
-		if (nextPaths.has(previousFile.path)) {
+		if (nextPaths.has(previousFile.path) || !copyPathSet.has(topLevelPath(previousFile.path))) {
 			continue;
 		}
 		candidates.add(previousFile.path);
 	}
 	for (const directory of previousDirectories) {
-		if (!nextDirectorySet.has(directory)) {
+		if (!nextDirectorySet.has(directory) && copyPathSet.has(topLevelPath(directory))) {
 			candidates.add(directory);
 		}
 	}
 
-	const sorted = [...candidates].sort(
+	const sortedCandidates = [...candidates].sort(
 		(left, right) => left.split('/').length - right.split('/').length,
 	);
-	const deletionPaths = sorted.filter(
-		(path, index) => !sorted.slice(0, index).some((parent) => path.startsWith(`${parent}/`)),
+	const deletionPaths = sortedCandidates.filter((path) => {
+		const segments = path.split('/');
+		while (segments.length > 1) {
+			segments.pop();
+			if (candidates.has(parseManifestPath(segments.join('/')))) {
+				return false;
+			}
+		}
+		return true;
+	});
+	const copiedDirectorySet = new Set(
+		previousDirectories.filter((directory) => copyPathSet.has(topLevelPath(directory))),
 	);
-	const previousDirectorySet = new Set(previousDirectories);
 	return {
+		copyPaths: [...copyPathSet].sort(),
 		deletionPaths,
-		directoriesToCreate: nextDirectories.filter(
-			(directory) => !previousDirectorySet.has(directory),
-		),
+		directoriesToCreate: nextDirectories.filter((directory) => !copiedDirectorySet.has(directory)),
 	};
 }
 
@@ -458,7 +480,7 @@ export class RemoteStore {
 			if (previousManifest === undefined) {
 				await this.#ensureRevisionDirectory(revisionPath, manifest, options);
 			} else {
-				await this.#cloneRevision(previousManifest, revisionPath, manifest, options);
+				await this.#reuseRevisionContents(previousManifest, revisionPath, manifest, options);
 			}
 			let completedUploads = 0;
 			await mapConcurrent(filesToUpload, FILE_OPERATION_CONCURRENCY, async (file) => {
@@ -687,12 +709,7 @@ export class RemoteStore {
 		manifest: ManifestV1,
 		options?: RemoteOperationOptions,
 	): Promise<void> {
-		const revisionsDirectory = remoteChild(this.#remoteRoot, REVISIONS_DIRECTORY_NAME);
-		throwIfCancelled(options);
-		if (!(await this.#gateway.exists(revisionsDirectory, requestOptions(options)))) {
-			await this.#gateway.createDirectory(revisionsDirectory, requestOptions(options));
-		}
-		await this.#gateway.createDirectory(revisionPath, requestOptions(options));
+		await this.#ensureRevisionRoot(revisionPath, options);
 		for (const directory of manifestDirectories(manifest)) {
 			throwIfCancelled(options);
 			await this.#gateway.createDirectory(
@@ -702,23 +719,39 @@ export class RemoteStore {
 		}
 	}
 
-	async #cloneRevision(
+	async #ensureRevisionRoot(
+		revisionPath: RemotePath,
+		options?: RemoteOperationOptions,
+	): Promise<void> {
+		const revisionsDirectory = remoteChild(this.#remoteRoot, REVISIONS_DIRECTORY_NAME);
+		throwIfCancelled(options);
+		if (!(await this.#gateway.exists(revisionsDirectory, requestOptions(options)))) {
+			await this.#gateway.createDirectory(revisionsDirectory, requestOptions(options));
+		}
+		await this.#gateway.createDirectory(revisionPath, requestOptions(options));
+	}
+
+	async #reuseRevisionContents(
 		previousManifest: ManifestV1,
 		revisionPath: RemotePath,
 		manifest: ManifestV1,
 		options?: RemoteOperationOptions,
 	): Promise<void> {
-		await this.#gateway.copyPath(
-			this.#revisionPath(previousManifest.revision),
-			revisionPath,
-			requestOptions(options),
+		await this.#ensureRevisionRoot(revisionPath, options);
+		const plan = planRevisionReuse(previousManifest, manifest);
+		const previousRevisionPath = this.#revisionPath(previousManifest.revision);
+		await mapConcurrent(plan.copyPaths, FILE_OPERATION_CONCURRENCY, (path) =>
+			this.#gateway.copyPath(
+				remoteChild(previousRevisionPath, path),
+				remoteChild(revisionPath, path),
+				requestOptions(options),
+			),
 		);
-		const changes = planClonedRevisionChanges(previousManifest, manifest);
-		await mapConcurrent(changes.deletionPaths, FILE_OPERATION_CONCURRENCY, (path) =>
+		await mapConcurrent(plan.deletionPaths, FILE_OPERATION_CONCURRENCY, (path) =>
 			this.#gateway.deletePath(remoteChild(revisionPath, path), requestOptions(options)),
 		);
 
-		for (const directory of changes.directoriesToCreate) {
+		for (const directory of plan.directoriesToCreate) {
 			throwIfCancelled(options);
 			await this.#gateway.createDirectory(
 				remoteChild(revisionPath, directory),

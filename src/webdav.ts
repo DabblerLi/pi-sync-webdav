@@ -286,7 +286,14 @@ class SafeWebDavGateway implements WebDavGateway {
 			if (isRecord(error)) {
 				discardResponseBody(error.response);
 			}
-			throw toSafeRequestError(error);
+			const safeError = toSafeRequestError(error);
+			if (safeError.status === undefined || [401, 403, 404].includes(safeError.status)) {
+				throw safeError;
+			}
+			throw new WebDavRequestError(`WebDAV COPY failed with HTTP status ${safeError.status}`, {
+				retryable: safeError.retryable,
+				status: safeError.status,
+			});
 		}
 		discardResponseBody(response);
 		if (response.status !== 201 && response.status !== 204) {
