@@ -252,7 +252,7 @@ describe('remote store', () => {
 	});
 
 	it('leaves a late COPY result inactive and available for residue cleanup', async () => {
-		const { connection, root, server, store } = await createStore();
+		const { gateway, root, store } = await createStore();
 		const first = await store.publishRevision({
 			allowUnverifiedManifest: false,
 			expectedManifestSha256: undefined,
@@ -262,10 +262,15 @@ describe('remote store', () => {
 		if (snapshot === undefined) {
 			throw new Error('Expected a manifest after publishing');
 		}
-		server.delayNext('COPY', `${root}/revisions/${first.manifest.revision}`, 50);
-		const timeoutGateway = createWebDavGateway(connection, {
-			requestTimeoutMs: 10,
-			retryDelaysMs: [],
+		const copyRelease = Promise.withResolvers<void>();
+		let delayedCopy: Promise<void> | undefined;
+		const timeoutGateway = overrideGateway(gateway, {
+			copyPath: async (source, destination, options) => {
+				delayedCopy = copyRelease.promise.then(() =>
+					gateway.copyPath(source, destination, options),
+				);
+				throw new WebDavRequestError('WebDAV request timed out', { retryable: true });
+			},
 		});
 
 		await expect(
@@ -275,7 +280,11 @@ describe('remote store', () => {
 				files: [{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') }],
 			}),
 		).rejects.toThrow('WebDAV request timed out');
-		await delay(70);
+		if (delayedCopy === undefined) {
+			throw new Error('Expected a delayed revision copy');
+		}
+		copyRelease.resolve();
+		await delayedCopy;
 
 		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
 		const residue = await store.inspectResidue();
@@ -542,12 +551,14 @@ describe('remote store', () => {
 		const { gateway, root, store } = await createStore();
 		await store.ensureRoot();
 		const manifestPath = parseRemotePath(`${root}/manifest.json`);
+		const manifestWriteRelease = Promise.withResolvers<void>();
+		let delayedManifestWrite: Promise<void> | undefined;
 		const delayedGateway = overrideGateway(gateway, {
 			writeFile: async (path, contents, onProgress, options) => {
 				if (path === manifestPath) {
-					setTimeout(() => {
-						void gateway.writeFile(path, contents, onProgress, options);
-					}, 20);
+					delayedManifestWrite = manifestWriteRelease.promise.then(() =>
+						gateway.writeFile(path, contents, onProgress, options),
+					);
 					throw new WebDavRequestError('WebDAV request cancelled', { retryable: false });
 				}
 				await gateway.writeFile(path, contents, onProgress, options);
@@ -561,7 +572,11 @@ describe('remote store', () => {
 				files: [{ contents: Buffer.from('new', 'utf8'), path: parseManifestPath('settings.json') }],
 			}),
 		).rejects.toBeInstanceOf(RemoteCommitUnknownError);
-		await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 50));
+		if (delayedManifestWrite === undefined) {
+			throw new Error('Expected a delayed manifest write');
+		}
+		manifestWriteRelease.resolve();
+		await delayedManifestWrite;
 		const committed = await store.readManifest();
 		if (committed === undefined) {
 			throw new Error('Expected delayed manifest activation');
