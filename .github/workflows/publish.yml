@@ -6,12 +6,14 @@ on:
       - 'v*'
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -24,11 +26,20 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           test "$GITHUB_REF_NAME" = "v$version"
+      - name: Verify CI passed for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          commit="$(git rev-parse HEAD)"
+          runs="$(gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f head_sha="$commit" \
+            -f branch=main \
+            -f event=push \
+            -f status=success \
+            -f per_page=1 \
+            --jq '.total_count')"
+          test "$runs" -gt 0
       - run: npm install --global npm@^11.5.1
-      - run: npm ci
-      - run: npm run format:check
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run pack:check
       - run: npm publish --access public --provenance
