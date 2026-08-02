@@ -1,3 +1,5 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { generateRevisionId } from '../src/manifest.js';
@@ -127,6 +129,41 @@ describe('remote store', () => {
 			await gateway.exists(parseRemotePath(`${root}/revisions/${first.manifest.revision}`)),
 		).toBe(false);
 		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
+	});
+
+	it('uploads revision files with bounded concurrency', async () => {
+		const { gateway, root } = await createStore();
+		let activeUploads = 0;
+		let maximumActiveUploads = 0;
+		const delayedGateway = overrideGateway(gateway, {
+			writeFile: async (path, contents, onProgress, options) => {
+				if (!path.includes('/revisions/')) {
+					await gateway.writeFile(path, contents, onProgress, options);
+					return;
+				}
+				activeUploads += 1;
+				maximumActiveUploads = Math.max(maximumActiveUploads, activeUploads);
+				try {
+					await delay(10);
+					await gateway.writeFile(path, contents, onProgress, options);
+				} finally {
+					activeUploads -= 1;
+				}
+			},
+		});
+		const store = new RemoteStore(delayedGateway, root);
+
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: Array.from({ length: 6 }, (_, index) => ({
+				contents: Buffer.from(`file-${index}`, 'utf8'),
+				path: parseManifestPath(`file-${index}.txt`),
+			})),
+		});
+
+		expect(maximumActiveUploads).toBeGreaterThan(1);
+		expect(maximumActiveUploads).toBeLessThanOrEqual(4);
 	});
 
 	it('rejects a truncated revision upload without deleting the active revision', async () => {

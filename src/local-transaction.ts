@@ -69,6 +69,15 @@ function isMissingPath(error: unknown): error is NodeJS.ErrnoException {
 	);
 }
 
+function isAlreadyExistsPath(error: unknown): error is NodeJS.ErrnoException {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		(error as { readonly code?: unknown }).code === 'EEXIST'
+	);
+}
+
 function sha256(contents: Buffer): string {
 	return createHash('sha256').update(contents).digest('hex');
 }
@@ -129,7 +138,13 @@ async function ensureSafeDirectory(
 		if (!isMissingPath(error)) {
 			throw error;
 		}
-		await fs.mkdir(path, { mode });
+		try {
+			await fs.mkdir(path, { mode });
+		} catch (mkdirError: unknown) {
+			if (!isAlreadyExistsPath(mkdirError)) {
+				throw mkdirError;
+			}
+		}
 		const entry = await fs.lstat(path);
 		if (!entry.isDirectory() || entry.isSymbolicLink()) {
 			throw new Error(errorMessage);

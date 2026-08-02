@@ -10,7 +10,12 @@ import {
 	type ManifestV1,
 	type RevisionId,
 } from './manifest.js';
-import type { OperationOptions, OperationProgress } from './operation.js';
+import {
+	FILE_OPERATION_CONCURRENCY,
+	mapConcurrent,
+	type OperationOptions,
+	type OperationProgress,
+} from './operation.js';
 import {
 	parseManifestPath,
 	parseRemotePath,
@@ -387,13 +392,8 @@ export class RemoteStore {
 
 		try {
 			await this.#ensureRevisionDirectory(revisionPath, manifest, options);
-			for (const [index, file] of input.files.entries()) {
-				throwIfCancelled(options);
-				reportProgress(options, {
-					completed: index + 1,
-					phase: 'uploading',
-					total: input.files.length,
-				});
+			let completedUploads = 0;
+			await mapConcurrent(input.files, FILE_OPERATION_CONCURRENCY, async (file, index) => {
 				throwIfCancelled(options);
 				const remoteFile = remoteChild(revisionPath, file.path);
 				await this.#gateway.writeFile(
@@ -412,7 +412,13 @@ export class RemoteStore {
 					throw new Error('Missing revision file metadata');
 				}
 				assertRevisionFileIntegrity(expectedFile, uploadedContents);
-			}
+				completedUploads += 1;
+				reportProgress(options, {
+					completed: completedUploads,
+					phase: 'uploading',
+					total: input.files.length,
+				});
+			});
 
 			const beforeCommit = await this.readRawManifest(options);
 			if (beforeCommit?.sha256 !== currentManifest?.sha256) {

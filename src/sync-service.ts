@@ -4,7 +4,12 @@ import { TextDecoder } from 'node:util';
 import { SettingsManager, type PackageSource } from '@earendil-works/pi-coding-agent';
 
 import { connectionFingerprint, writeConfig, type PluginConfig } from './config.js';
-import { isOperationCancelled, type OperationOptions } from './operation.js';
+import {
+	FILE_OPERATION_CONCURRENCY,
+	isOperationCancelled,
+	mapConcurrent,
+	type OperationOptions,
+} from './operation.js';
 import {
 	applyPullPlan,
 	createPullWorkspace,
@@ -291,16 +296,10 @@ export async function stagePreparedPull(
 	const operation = normalizeOperationOptions(options);
 	let workspace: PullWorkspace | undefined;
 	try {
-		workspace = await createPullWorkspace(agentRoot);
-		for (const [index, file] of preparation.plan.downloads.entries()) {
-			if (operation?.signal?.aborted) {
-				throw new Error('Pull download cancelled');
-			}
-			operation?.onProgress?.({
-				completed: index + 1,
-				phase: 'downloading',
-				total: preparation.plan.downloads.length,
-			});
+		const activeWorkspace = await createPullWorkspace(agentRoot);
+		workspace = activeWorkspace;
+		let completedDownloads = 0;
+		await mapConcurrent(preparation.plan.downloads, FILE_OPERATION_CONCURRENCY, async (file) => {
 			if (operation?.signal?.aborted) {
 				throw new Error('Pull download cancelled');
 			}
@@ -312,10 +311,16 @@ export async function stagePreparedPull(
 							file,
 							remoteOperationOptions(operation),
 						);
-			await stageVerifiedFile(agentRoot, workspace, file, contents, operation);
-		}
-		await sealPullWorkspace(agentRoot, workspace, preparation.manifest, operation);
-		return { preparation, workspace };
+			await stageVerifiedFile(agentRoot, activeWorkspace, file, contents, operation);
+			completedDownloads += 1;
+			operation?.onProgress?.({
+				completed: completedDownloads,
+				phase: 'downloading',
+				total: preparation.plan.downloads.length,
+			});
+		});
+		await sealPullWorkspace(agentRoot, activeWorkspace, preparation.manifest, operation);
+		return { preparation, workspace: activeWorkspace };
 	} catch (error: unknown) {
 		if (workspace === undefined) {
 			throw error;

@@ -4,7 +4,12 @@ import { join, resolve } from 'node:path';
 import { TextDecoder } from 'node:util';
 
 import { MAX_FILE_BYTES, MAX_OPERATION_BYTES } from './manifest.js';
-import { throwIfOperationCancelled, type OperationOptions } from './operation.js';
+import {
+	FILE_OPERATION_CONCURRENCY,
+	mapConcurrent,
+	throwIfOperationCancelled,
+	type OperationOptions,
+} from './operation.js';
 import {
 	isPermanentlyExcluded,
 	parseManifestPath,
@@ -216,7 +221,10 @@ export async function collectLocalSelection(input: {
 		throw new Error('Duplicate push include');
 	}
 
-	const files: CollectedLocalFile[] = [];
+	const filesToRead: Array<{
+		readonly absolutePath: string;
+		readonly relativePath: SafeRelativePath;
+	}> = [];
 	const secretWarningPaths = new Set<SafeRelativePath>();
 	const skippedSymlinkPaths = new Set<SafeRelativePath>();
 	let totalBytes = 0;
@@ -245,30 +253,7 @@ export async function collectLocalSelection(input: {
 		if (entry.size > MAX_FILE_BYTES) {
 			throw new Error('Selected file exceeds the size limit');
 		}
-
-		const contents = await readRegularFileSnapshot(absolutePath, {
-			errorMessage: 'Unable to read selected file',
-			maxBytes: MAX_FILE_BYTES,
-			...(relativePath === 'auth.json' && input.enforceAuthPermissions ? { mode: 0o600 } : {}),
-		});
-		throwIfOperationCancelled(input.operation?.signal);
-		if (contents === undefined) {
-			return;
-		}
-
-		totalBytes += contents.byteLength;
-		if (totalBytes > MAX_OPERATION_BYTES) {
-			throw new Error('Selected files exceed the size limit');
-		}
-		files.push({
-			contents,
-			path: relativePath,
-			sha256: sha256(contents),
-			size: contents.byteLength,
-		});
-		if (containsSecretPattern(contents)) {
-			secretWarningPaths.add(relativePath);
-		}
+		filesToRead.push({ absolutePath, relativePath });
 	};
 
 	const collectDirectory = async (
@@ -361,6 +346,38 @@ export async function collectLocalSelection(input: {
 		}
 		throw new Error('Selected path contains an unsupported file type');
 	}
+
+	const files = (
+		await mapConcurrent(
+			filesToRead,
+			FILE_OPERATION_CONCURRENCY,
+			async ({ absolutePath, relativePath }) => {
+				throwIfOperationCancelled(input.operation?.signal);
+				const contents = await readRegularFileSnapshot(absolutePath, {
+					errorMessage: 'Unable to read selected file',
+					maxBytes: MAX_FILE_BYTES,
+					...(relativePath === 'auth.json' && input.enforceAuthPermissions ? { mode: 0o600 } : {}),
+				});
+				throwIfOperationCancelled(input.operation?.signal);
+				if (contents === undefined) {
+					return undefined;
+				}
+				totalBytes += contents.byteLength;
+				if (totalBytes > MAX_OPERATION_BYTES) {
+					throw new Error('Selected files exceed the size limit');
+				}
+				if (containsSecretPattern(contents)) {
+					secretWarningPaths.add(relativePath);
+				}
+				return {
+					contents,
+					path: relativePath,
+					sha256: sha256(contents),
+					size: contents.byteLength,
+				};
+			},
+		)
+	).filter((file): file is CollectedLocalFile => file !== undefined);
 
 	return {
 		files: files.sort((left, right) => comparePaths(left.path, right.path)),

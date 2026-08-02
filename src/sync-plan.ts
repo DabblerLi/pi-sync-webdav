@@ -9,7 +9,12 @@ import {
 	type ManifestFile,
 	type ManifestV1,
 } from './manifest.js';
-import { throwIfOperationCancelled, type OperationOptions } from './operation.js';
+import {
+	FILE_OPERATION_CONCURRENCY,
+	mapConcurrent,
+	throwIfOperationCancelled,
+	type OperationOptions,
+} from './operation.js';
 import {
 	assertNoPathCollisions,
 	assertSafeLocalTarget,
@@ -264,19 +269,26 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 
 	const actions: FileMutation[] = [];
 	let observedLocalBytes = 0;
-	const countObservedBytes = (local: LocalFileObservation | undefined): void => {
+	const observeAndCount = async (
+		path: SafeRelativePath,
+	): Promise<LocalFileObservation | undefined> => {
+		const local = await observeLocalFile(input.agentRoot, path, input.operation);
 		if (local === undefined) {
-			return;
+			return undefined;
 		}
 		observedLocalBytes += local.size;
 		if (observedLocalBytes > MAX_OPERATION_BYTES) {
 			throw new Error('Local sync targets exceed the size limit');
 		}
+		return local;
 	};
-	for (const file of manifest.files) {
-		throwIfOperationCancelled(input.operation?.signal);
-		const local = await observeLocalFile(input.agentRoot, file.path, input.operation);
-		countObservedBytes(local);
+	const manifestObservations = await mapConcurrent(
+		manifest.files,
+		FILE_OPERATION_CONCURRENCY,
+		(file) => observeAndCount(file.path),
+	);
+	for (const [index, file] of manifest.files.entries()) {
+		const local = manifestObservations[index];
 		if (local === undefined) {
 			actions.push({
 				action: 'add',
@@ -308,10 +320,13 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 		}
 	}
 
-	for (const path of deletionCandidates) {
-		throwIfOperationCancelled(input.operation?.signal);
-		const local = await observeLocalFile(input.agentRoot, path, input.operation);
-		countObservedBytes(local);
+	const deletionObservations = await mapConcurrent(
+		deletionCandidates,
+		FILE_OPERATION_CONCURRENCY,
+		(path) => observeAndCount(path),
+	);
+	for (const [index, path] of deletionCandidates.entries()) {
+		const local = deletionObservations[index];
 		if (local !== undefined) {
 			actions.push({
 				action: 'delete',
