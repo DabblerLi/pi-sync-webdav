@@ -57,7 +57,7 @@
 		"webdav": "^5.10.0"
 	},
 	"devDependencies": {
-		"@earendil-works/pi-coding-agent": "^0.83.0",
+		"@earendil-works/pi-coding-agent": "^0.84.1",
 		"@eslint/js": "^9.39.5",
 		"@types/node": "^22.20.0",
 		"eslint": "^9.39.5",
