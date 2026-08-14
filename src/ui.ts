@@ -129,6 +129,7 @@ class OptionListBody implements Component {
 		private readonly options: readonly string[],
 		private readonly theme: Theme,
 		private readonly tui: TUI,
+		private readonly useVimKeys = true,
 	) {}
 
 	get index(): number {
@@ -136,10 +137,13 @@ class OptionListBody implements Component {
 	}
 
 	handleInput(data: string): void {
-		if (this.keybindings.matches(data, 'tui.select.up') || data === 'k') {
+		if (this.keybindings.matches(data, 'tui.select.up') || (this.useVimKeys && data === 'k')) {
 			this.#index = moveCyclic(this.#index, -1, this.options.length);
 			this.tui.requestRender();
-		} else if (this.keybindings.matches(data, 'tui.select.down') || data === 'j') {
+		} else if (
+			this.keybindings.matches(data, 'tui.select.down') ||
+			(this.useVimKeys && data === 'j')
+		) {
 			this.#index = moveCyclic(this.#index, 1, this.options.length);
 			this.tui.requestRender();
 		} else if (this.keybindings.matches(data, 'tui.select.confirm') || data === '\n') {
@@ -310,92 +314,164 @@ function actionLabel(action: FileMutation['action']): string {
 	return action.toUpperCase();
 }
 
-export function formatPlanLines(
-	input: {
-		readonly files: readonly Pick<FileMutation, 'action' | 'path'>[];
-		readonly packages?: readonly PackageOperation[];
-		readonly warnings?: readonly string[];
-	},
-	options?: { maxFiles?: number; maxPackages?: number },
+export interface PlanDisplayInput {
+	readonly files: readonly Pick<FileMutation, 'action' | 'path'>[];
+	readonly packages?: readonly PackageOperation[];
+	readonly warnings?: readonly string[];
+}
+
+/** Files and package operation lines; these scroll in confirmation dialogs. */
+function formatPlanEntries(
+	files: PlanDisplayInput['files'],
+	packages: PlanDisplayInput['packages'],
 ): readonly string[] {
 	const lines: string[] = [];
-	if (input.files.length > 0) {
+	if (files.length > 0) {
 		lines.push('Files:');
-		const visible =
-			options?.maxFiles === undefined ? input.files : input.files.slice(0, options.maxFiles);
-		for (const file of visible) {
+		for (const file of files) {
 			lines.push(`  ${actionLabel(file.action)} ${file.path}`);
 		}
-		if (visible.length < input.files.length) {
-			lines.push(`  … and ${input.files.length - visible.length} more`);
-		}
 	}
-	if (input.packages !== undefined && input.packages.length > 0) {
+	if (packages !== undefined && packages.length > 0) {
 		if (lines.length > 0) {
 			lines.push('');
 		}
 		lines.push('Packages:');
-		const visible =
-			options?.maxPackages === undefined
-				? input.packages
-				: input.packages.slice(0, options.maxPackages);
-		for (const operation of visible) {
+		for (const operation of packages) {
 			lines.push(`  ${operation.action.toUpperCase()} ${operation.source}`);
-		}
-		if (visible.length < input.packages.length) {
-			lines.push(`  … and ${input.packages.length - visible.length} more`);
-		}
-	}
-	if (input.warnings !== undefined && input.warnings.length > 0) {
-		if (lines.length > 0) {
-			lines.push('');
-		}
-		lines.push('⚠️ Warnings:');
-		for (const warning of input.warnings) {
-			lines.push(`  ${warning}`);
 		}
 	}
 	return lines;
 }
 
-const MAX_VISIBLE_PLAN_OPERATIONS = 5;
+/** Warning lines; these stay pinned above the Yes/No options. */
+function formatPlanWarnings(warnings: PlanDisplayInput['warnings']): readonly string[] {
+	if (warnings === undefined || warnings.length === 0) {
+		return [];
+	}
+	return ['⚠️ Warnings:', ...warnings.map((warning) => `  ${warning}`)];
+}
 
-function planDisplayLimits(input: Parameters<typeof formatPlanLines>[0]): {
-	readonly maxFiles: number;
-	readonly maxPackages: number;
-} {
-	const packageCount = input.packages?.length ?? 0;
-	if (input.files.length === 0) {
-		return { maxFiles: 0, maxPackages: MAX_VISIBLE_PLAN_OPERATIONS };
+export function formatPlanLines(input: PlanDisplayInput): readonly string[] {
+	const entries = formatPlanEntries(input.files, input.packages);
+	const warnings = formatPlanWarnings(input.warnings);
+	if (entries.length === 0 || warnings.length === 0) {
+		return [...entries, ...warnings];
 	}
-	if (packageCount === 0) {
-		return { maxFiles: MAX_VISIBLE_PLAN_OPERATIONS, maxPackages: 0 };
+	return [...entries, '', ...warnings];
+}
+
+const VISIBLE_CANDIDATES = 12;
+const VISIBLE_PLAN_LINES = 12;
+
+/**
+ * Fixed-window scrolling list of plan lines, matching the selectPushIncludes
+ * pattern. j/k scroll the plan body one line and PageUp/PageDown one window;
+ * the Yes/No options keep the arrow keys to themselves.
+ */
+class ScrollablePlanBody implements Component {
+	#scrollTop = 0;
+
+	constructor(
+		private readonly lines: readonly string[],
+		private readonly theme: Theme,
+		private readonly tui: TUI,
+	) {}
+
+	get #visibleCount(): number {
+		return Math.min(VISIBLE_PLAN_LINES, this.lines.length);
 	}
 
-	let maxFiles = Math.min(input.files.length, Math.ceil(MAX_VISIBLE_PLAN_OPERATIONS / 2));
-	let maxPackages = Math.min(packageCount, MAX_VISIBLE_PLAN_OPERATIONS - maxFiles);
-	const remaining = MAX_VISIBLE_PLAN_OPERATIONS - maxFiles - maxPackages;
-	if (maxFiles < input.files.length) {
-		maxFiles += Math.min(remaining, input.files.length - maxFiles);
-	} else {
-		maxPackages += Math.min(remaining, packageCount - maxPackages);
+	#scrollBy(delta: number): void {
+		const visible = this.#visibleCount;
+		this.#scrollTop = Math.max(0, Math.min(this.#scrollTop + delta, this.lines.length - visible));
+		this.tui.requestRender();
 	}
-	return { maxFiles, maxPackages };
+
+	handleInput(data: string): void {
+		if (matchesKey(data, Key.pageUp)) {
+			this.#scrollBy(-this.#visibleCount);
+		} else if (matchesKey(data, Key.pageDown)) {
+			this.#scrollBy(this.#visibleCount);
+		} else if (data === 'k') {
+			this.#scrollBy(-1);
+		} else if (data === 'j') {
+			this.#scrollBy(1);
+		}
+	}
+
+	invalidate(): void {
+		// Stateless: rows are rebuilt from the scroll position on every render.
+	}
+
+	render(width: number): string[] {
+		const visible = this.#visibleCount;
+		const lines: string[] = [];
+		for (const line of this.lines.slice(this.#scrollTop, this.#scrollTop + visible)) {
+			lines.push(truncateToWidth(` ${this.theme.fg('text', line)}`, width));
+		}
+		if (this.lines.length > visible) {
+			const position = `${this.#scrollTop + 1}-${this.#scrollTop + visible} of ${this.lines.length}`;
+			lines.push(truncateToWidth(` ${this.theme.fg('dim', position)}`, width));
+		}
+		return lines;
+	}
 }
 
 export async function confirmSyncPlan(
 	ctx: ExtensionCommandContext,
 	title: string,
-	input: Parameters<typeof formatPlanLines>[0],
+	input: PlanDisplayInput,
 ): Promise<boolean> {
 	if (ctx.mode !== 'tui') {
 		return false;
 	}
-	const lines = formatPlanLines(input, planDisplayLimits(input));
-	return confirmDialog(ctx, title, lines.length === 0 ? 'No changes.' : lines.join('\n'));
+	return ctx.ui.custom<boolean>((tui, theme, keybindings, done) => {
+		const entries = formatPlanEntries(input.files, input.packages);
+		const warnings = formatPlanWarnings(input.warnings);
+		const scrollable = new ScrollablePlanBody(entries, theme, tui);
+		const options = ['Yes', 'No'] as const;
+		const list = new OptionListBody(
+			keybindings,
+			() => done(false),
+			(index) => done(options[index] === 'Yes'),
+			options,
+			theme,
+			tui,
+			false,
+		);
+		const body: Component[] = [scrollable];
+		if (warnings.length > 0) {
+			body.push(new Spacer(1));
+			for (const warning of warnings) {
+				body.push(new Text(theme.fg('warning', warning), 1, 0));
+			}
+		}
+		body.push(new Spacer(1), list);
+		const container = createDialogContainer({
+			body,
+			hints: formatKeyHints(theme, [
+				['↑↓', 'choose'],
+				['j/k', 'scroll'],
+				['PgUp/PgDn', 'page'],
+				[bindingKeys(keybindings, 'tui.select.confirm'), 'select'],
+				[bindingKeys(keybindings, 'tui.select.cancel'), 'cancel'],
+			]),
+			theme,
+			title,
+		});
+		return {
+			handleInput: (data: string) => {
+				// The option list owns the arrow keys; the plan body scrolls with
+				// j/k and page keys, so the two never contend for input.
+				list.handleInput(data);
+				scrollable.handleInput(data);
+			},
+			invalidate: () => container.invalidate(),
+			render: (width: number) => container.render(width),
+		};
+	});
 }
-
-const VISIBLE_CANDIDATES = 12;
 
 export async function selectPushIncludes(
 	ctx: ExtensionCommandContext,

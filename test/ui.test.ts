@@ -90,7 +90,7 @@ describe('sync plan rendering', () => {
 });
 
 describe('confirmSyncPlan', () => {
-	it('truncates long plans and reports the hidden count', async () => {
+	it('scrolls long plans inside a window and reports the visible range', async () => {
 		const files = Array.from({ length: 20 }, (_, index) => ({
 			action: 'add' as const,
 			path: parseManifestPath(`file-${index}.json`),
@@ -102,13 +102,31 @@ describe('confirmSyncPlan', () => {
 		});
 		await confirmSyncPlan(ctx, 'Push these changes to WebDAV?', { files });
 		const text = rendered.join('\n');
-		expect(text).toContain('ADD file-4.json');
-		expect(text).not.toContain('ADD file-5.json');
-		expect(text).toContain('… and 15 more');
+		expect(text).toContain('ADD file-0.json');
+		expect(text).toContain('1-12 of 21');
+		expect(text).not.toContain('ADD file-12.json');
 	});
 
-	it('limits mixed file and package operations while keeping warnings and choices visible', async () => {
-		const files = Array.from({ length: 10 }, (_, index) => ({
+	it('scrolls the plan body one window and clamps at the end', async () => {
+		const files = Array.from({ length: 20 }, (_, index) => ({
+			action: 'add' as const,
+			path: parseManifestPath(`file-${index}.json`),
+		}));
+		let rendered: string[] = [];
+		const ctx = createContext((component, done) => {
+			component.handleInput?.('\x1b[6~'); // page down
+			component.handleInput?.('\x1b[6~'); // page down again
+			rendered = component.render(60);
+			done(false as never);
+		});
+		await confirmSyncPlan(ctx, 'Push these changes to WebDAV?', { files });
+		const text = rendered.join('\n');
+		expect(text).toContain('ADD file-12.json');
+		expect(text).toContain('10-21 of 21');
+	});
+
+	it('pins warnings above the options while entries scroll', async () => {
+		const files = Array.from({ length: 20 }, (_, index) => ({
 			action: 'add' as const,
 			path: parseManifestPath(`file-${index}.json`),
 		}));
@@ -118,6 +136,9 @@ describe('confirmSyncPlan', () => {
 		}));
 		let rendered: string[] = [];
 		const ctx = createContext((component, done) => {
+			component.handleInput?.('\x1b[6~'); // page down into the packages block
+			component.handleInput?.('\x1b[6~');
+			component.handleInput?.('\x1b[6~');
 			rendered = component.render(80);
 			done(false as never);
 		});
@@ -129,16 +150,11 @@ describe('confirmSyncPlan', () => {
 		});
 
 		const text = rendered.join('\n');
-		expect(text).toContain('ADD file-2.json');
-		expect(text).not.toContain('ADD file-3.json');
-		expect(text).toContain('… and 7 more');
-		expect(text).toContain('INSTALL npm:package-1');
-		expect(text).not.toContain('INSTALL npm:package-2');
-		expect(text).toContain('… and 8 more');
+		expect(text).toContain('22-33 of 33'); // scrolled to the end
+		expect(text).toContain('⚠️ Warnings:');
 		expect(text).toContain('Package code will run with your user permissions.');
 		expect(text).toContain('→ Yes');
 		expect(text).toContain('No');
-		expect(rendered.length).toBeLessThanOrEqual(24);
 	});
 
 	it('shows short plans in full', async () => {
@@ -151,7 +167,52 @@ describe('confirmSyncPlan', () => {
 			files: [{ action: 'add', path: parseManifestPath('settings.json') }],
 		});
 		expect(rendered.join('\n')).toContain('ADD settings.json');
-		expect(rendered.join('\n')).not.toContain('… and');
+		expect(rendered.join('\n')).not.toContain('of 2');
+	});
+
+	it('scrolls the plan with j/k without moving the Yes/No cursor', async () => {
+		const files = Array.from({ length: 20 }, (_, index) => ({
+			action: 'add' as const,
+			path: parseManifestPath(`file-${index}.json`),
+		}));
+		let rendered: string[] = [];
+		const ctx = createContext((component, done) => {
+			component.handleInput?.('j'); // scroll plan down one line
+			rendered = component.render(60);
+			done(false as never);
+		});
+		await confirmSyncPlan(ctx, 'Push these changes to WebDAV?', { files });
+		const text = rendered.join('\n');
+		expect(text).toContain('2-13 of 21');
+		expect(text).toContain('→ Yes'); // cursor did not move to No
+	});
+
+	it('keeps the plan window fixed while arrow keys move the Yes/No cursor', async () => {
+		const files = Array.from({ length: 20 }, (_, index) => ({
+			action: 'add' as const,
+			path: parseManifestPath(`file-${index}.json`),
+		}));
+		let rendered: string[] = [];
+		const ctx = createContext((component, done) => {
+			component.handleInput?.('\x1b[B'); // move cursor to No
+			rendered = component.render(60);
+			done(false as never);
+		});
+		await confirmSyncPlan(ctx, 'Push these changes to WebDAV?', { files });
+		const text = rendered.join('\n');
+		expect(text).toContain('1-12 of 21'); // plan did not scroll
+		expect(text).toContain('→ No');
+	});
+
+	it('declines on escape', async () => {
+		const ctx = createContext((component) => {
+			component.handleInput?.('\x1b');
+		});
+		await expect(
+			confirmSyncPlan(ctx, 'Push these changes to WebDAV?', {
+				files: [{ action: 'add', path: parseManifestPath('settings.json') }],
+			}),
+		).resolves.toBe(false);
 	});
 });
 

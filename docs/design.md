@@ -42,7 +42,7 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 
 - The local include list affects push only. Pull always applies the remote manifest.
 - Only files listed in the manifest are materialized; absent or empty directories are not created by pull.
-- Pushes and pulls with changes present one batch confirmation using file paths and add/update/delete actions. A permission-only `SECURE auth.json` action is also confirmed.
+- Pushes and pulls with changes present one batch confirmation using file paths and add/update/delete actions. A permission-only `SECURE auth.json` action is also confirmed. The plan list scrolls inside the dialog with j/k and page keys, and warnings stay pinned above the confirm options.
 - Pull downloads and verifies only added or updated files before replacing local files. Unchanged files, deletions, and permission-only repairs require no file download. Local backups are created before overwrites or managed-file deletions.
 - Pull deletes only paths recorded in matching local sync state that are absent from the current manifest. First pull or a changed connection never deletes local files.
 - Independent file reads, validation, uploads, and downloads run with a concurrency limit of four. Manifest activation, backups, local application, and rollback remain serial.
