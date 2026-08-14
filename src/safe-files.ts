@@ -28,7 +28,7 @@ export async function readRegularFileSnapshot(
 		if (isMissingPath(error)) {
 			return undefined;
 		}
-		throw new Error(options.errorMessage);
+		throw new Error(options.errorMessage, { cause: error });
 	}
 	if (!initial.isFile() || initial.isSymbolicLink() || initial.size > options.maxBytes) {
 		throw new Error(options.errorMessage);
@@ -41,7 +41,7 @@ export async function readRegularFileSnapshot(
 		if (isMissingPath(error)) {
 			return undefined;
 		}
-		throw new Error(options.errorMessage);
+		throw new Error(options.errorMessage, { cause: error });
 	}
 	try {
 		const opened = await handle.stat();

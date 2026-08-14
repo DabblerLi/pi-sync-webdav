@@ -130,7 +130,7 @@ async function getCandidateType(path: string): Promise<'directory' | 'file' | 'm
 		if (isMissingPath(error)) {
 			return 'missing';
 		}
-		throw new Error('Unable to inspect local selection candidate');
+		throw new Error('Unable to inspect local selection candidate', { cause: error });
 	}
 }
 
@@ -241,7 +241,7 @@ export async function collectLocalSelection(input: {
 			if (isMissingPath(error)) {
 				return;
 			}
-			throw new Error('Unable to inspect selected file');
+			throw new Error('Unable to inspect selected file', { cause: error });
 		}
 		if (entry.isSymbolicLink()) {
 			skippedSymlinkPaths.add(relativePath);
@@ -268,7 +268,7 @@ export async function collectLocalSelection(input: {
 			if (isMissingPath(error)) {
 				return;
 			}
-			throw new Error('Unable to inspect selected directory');
+			throw new Error('Unable to inspect selected directory', { cause: error });
 		}
 		if (directoryEntry.isSymbolicLink()) {
 			skippedSymlinkPaths.add(relativePath);
@@ -285,7 +285,7 @@ export async function collectLocalSelection(input: {
 			if (isMissingPath(error)) {
 				return;
 			}
-			throw new Error('Unable to list selected directory');
+			throw new Error('Unable to list selected directory', { cause: error });
 		}
 		for (const name of entries.sort()) {
 			throwIfOperationCancelled(input.operation?.signal);
@@ -302,7 +302,7 @@ export async function collectLocalSelection(input: {
 				if (isMissingPath(error)) {
 					continue;
 				}
-				throw new Error('Unable to inspect selected path');
+				throw new Error('Unable to inspect selected path', { cause: error });
 			}
 			if (entry.isSymbolicLink()) {
 				skippedSymlinkPaths.add(childPath);
@@ -330,7 +330,7 @@ export async function collectLocalSelection(input: {
 			if (isMissingPath(error)) {
 				continue;
 			}
-			throw new Error('Unable to inspect selected path');
+			throw new Error('Unable to inspect selected path', { cause: error });
 		}
 		if (entry.isSymbolicLink()) {
 			skippedSymlinkPaths.add(include);

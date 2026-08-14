@@ -123,7 +123,7 @@ export function parseManifest(json: string): ManifestV1 {
 		return validateManifest(JSON.parse(json));
 	} catch (error: unknown) {
 		if (error instanceof SyntaxError) {
-			throw new Error('Manifest is not valid JSON');
+			throw new Error('Manifest is not valid JSON', { cause: error });
 		}
 		throw error;
 	}

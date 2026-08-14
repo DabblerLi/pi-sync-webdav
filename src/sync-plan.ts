@@ -127,7 +127,7 @@ async function observeLocalFile(
 		if (isMissingPath(error)) {
 			return undefined;
 		}
-		throw new Error('Unable to inspect local sync target');
+		throw new Error('Unable to inspect local sync target', { cause: error });
 	}
 	if (!entry.isFile() || entry.isSymbolicLink()) {
 		throw new Error('Unsafe local sync target');

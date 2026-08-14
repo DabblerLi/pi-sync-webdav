@@ -180,7 +180,7 @@ function normalizeWebDavUrl(value: unknown): NormalizedUrl {
 	return url.toString() as NormalizedUrl;
 }
 
-function normalizeRemotePath(value: unknown): RemotePath {
+export function normalizeRemotePath(value: unknown): RemotePath {
 	return parseLogicalRelativePath(value, 'Invalid remote path', true) as RemotePath;
 }
 

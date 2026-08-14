@@ -147,7 +147,7 @@ async function ensureSafeDirectory(
 		}
 		const entry = await fs.lstat(path);
 		if (!entry.isDirectory() || entry.isSymbolicLink()) {
-			throw new Error(errorMessage);
+			throw new Error(errorMessage, { cause: error });
 		}
 	}
 }

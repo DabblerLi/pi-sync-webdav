@@ -179,9 +179,9 @@ async function assertAgentRootDirectory(agentRoot: string): Promise<void> {
 		entry = await fs.lstat(agentRoot);
 	} catch (error: unknown) {
 		if (isMissingPath(error)) {
-			throw new Error('Pi agent directory does not exist');
+			throw new Error('Pi agent directory does not exist', { cause: error });
 		}
-		throw new Error('Unable to inspect Pi agent directory');
+		throw new Error('Unable to inspect Pi agent directory', { cause: error });
 	}
 
 	if (!entry.isDirectory() || entry.isSymbolicLink()) {
@@ -248,7 +248,7 @@ export async function readConfig(agentRoot: string): Promise<PluginConfig | unde
 		if (isMissingPath(error)) {
 			return undefined;
 		}
-		throw new Error('Unable to inspect private configuration directory');
+		throw new Error('Unable to inspect private configuration directory', { cause: error });
 	}
 	if (
 		!directoryEntry.isDirectory() ||
@@ -268,7 +268,7 @@ export async function readConfig(agentRoot: string): Promise<PluginConfig | unde
 		if (error instanceof SyntaxError) {
 			invalidConfig();
 		}
-		throw new Error('Unable to read plugin configuration');
+		throw new Error('Unable to read plugin configuration', { cause: error });
 	}
 	return validatePluginConfig(parsed);
 }

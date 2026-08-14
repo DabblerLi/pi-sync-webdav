@@ -331,7 +331,7 @@ export async function stagePreparedPull(
 			throw new Error('Pull download failed and workspace cleanup failed', { cause: error });
 		}
 		if (isOperationCancelled(error)) {
-			throw new Error('Pull download cancelled');
+			throw new Error('Pull download cancelled', { cause: error });
 		}
 		throw error;
 	}
