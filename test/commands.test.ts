@@ -198,6 +198,42 @@ describe('sync command registration', () => {
 		});
 	});
 
+	it('re-prompts for an invalid remote path without asking for credentials again', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const { command: registered } = registerTestCommand(root);
+		const notify = vi.fn();
+		const input = vi
+			.fn()
+			.mockResolvedValueOnce(server.baseUrl)
+			.mockResolvedValueOnce('') // empty input is rejected
+			.mockResolvedValueOnce('backup//nested') // rejected immediately
+			.mockResolvedValueOnce('pi-sync-webdav')
+			.mockResolvedValueOnce('alice');
+		const driver = createCustomDriver([
+			valueStep('password'),
+			valueStep(true),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('settings.json')]),
+			{ type: 'complete' },
+		]);
+
+		await registered.handler('', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input, notify },
+		} as unknown as ExtensionCommandContext);
+
+		// Two remote path re-prompts happened; username was asked once.
+		expect(input).toHaveBeenCalledTimes(5);
+		expect(notify).toHaveBeenCalledWith('Invalid remote path', 'error');
+		expect(await readConfig(root)).toMatchObject({
+			connection: { username: 'alice' },
+			pushInclude: [parsePushInclude('settings.json')],
+		});
+	});
+
 	it('does not save initial configuration when connection validation is cancelled', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
 		temporaryDirectories.push(root);

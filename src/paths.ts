@@ -241,7 +241,7 @@ async function assertNoSymlinksBelowAgentRoot(agentRoot: string, target: string)
 			if (isMissingPath(error)) {
 				return;
 			}
-			throw new Error('Unable to inspect local target');
+			throw new Error('Unable to inspect local target', { cause: error });
 		}
 
 		if (entry.isSymbolicLink()) {

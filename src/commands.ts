@@ -11,7 +11,12 @@ import {
 	planRestore,
 	type ApplyResult,
 } from './local-transaction.js';
-import { parseRemotePath, normalizeConnection, type NormalizedConnection } from './paths.js';
+import {
+	normalizeConnection,
+	normalizeRemotePath,
+	parseRemotePath,
+	type NormalizedConnection,
+} from './paths.js';
 import type { OperationOptions, OperationProgress } from './operation.js';
 import {
 	RemoteStore,
@@ -177,22 +182,36 @@ async function loadSelectionCandidates(
 	return result.value;
 }
 
+/** Prompts for the remote path and re-prompts on invalid input. */
+async function promptRemotePath(ctx: ExtensionCommandContext): Promise<string | undefined> {
+	while (true) {
+		const remotePath = await ctx.ui.input('Remote path');
+		if (remotePath === undefined) {
+			return undefined;
+		}
+		try {
+			normalizeRemotePath(remotePath);
+		} catch (error: unknown) {
+			ctx.ui.notify(userVisibleError(error), 'error');
+			continue;
+		}
+		return remotePath;
+	}
+}
+
 async function promptConnection(
 	ctx: ExtensionCommandContext,
 	existing: PluginConfig | undefined,
 ): Promise<NormalizedConnection | undefined> {
-	const url = await ctx.ui.input('WebDAV URL', existing?.connection.url);
+	const url = await ctx.ui.input('WebDAV URL');
 	if (url === undefined) {
 		return undefined;
 	}
-	const remotePath = await ctx.ui.input(
-		'Remote path',
-		existing?.connection.remotePath ?? 'pi-sync-webdav/',
-	);
+	const remotePath = await promptRemotePath(ctx);
 	if (remotePath === undefined) {
 		return undefined;
 	}
-	const username = await ctx.ui.input('Username', existing?.connection.username);
+	const username = await ctx.ui.input('Username');
 	if (username === undefined) {
 		return undefined;
 	}
