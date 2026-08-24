@@ -486,6 +486,12 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 		ctx.ui.notify('Push cancelled.', 'info');
 		return;
 	}
+	if (published.value.copyFallbackEntries.length > 0) {
+		ctx.ui.notify(
+			`Server-side copy was unavailable for ${published.value.copyFallbackEntries.join(', ')}; those entries were uploaded in full.`,
+			'warning',
+		);
+	}
 	if (published.value.previousRevisionCleanup === 'failed') {
 		ctx.ui.notify('A previous remote revision remains. Run /sync-webdav cleanup.', 'warning');
 	} else if (published.value.previousRevisionCleanup === 'retained') {

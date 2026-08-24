@@ -191,7 +191,7 @@ describe('remote store', () => {
 		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
 	});
 
-	it('leaves the active revision intact when a top-level COPY is unsupported', async () => {
+	it('uploads an entry in full when its top-level COPY is unsupported', async () => {
 		const { gateway, root, server, store } = await createStore();
 		const first = await store.publishRevision({
 			allowUnverifiedManifest: false,
@@ -207,23 +207,82 @@ describe('remote store', () => {
 		}
 		server.failNext('COPY', `${root}/revisions/${first.manifest.revision}/themes`, 405);
 
+		const second = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: snapshot.sha256,
+			files: [
+				{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') },
+				{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+			],
+		});
+		expect(second.copyFallbackEntries).toEqual([parseManifestPath('themes')]);
+		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
+		const revisionRoot = `${root}/revisions/${second.manifest.revision}`;
 		await expect(
-			store.publishRevision({
-				allowUnverifiedManifest: false,
-				expectedManifestSha256: snapshot.sha256,
-				files: [
-					{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') },
-					{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
-				],
-			}),
-		).rejects.toMatchObject({ status: 405 });
-		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
+			gateway.readFile(parseRemotePath(`${revisionRoot}/themes/dark.txt`)),
+		).resolves.toEqual(Buffer.from('dark'));
+		await expect(
+			gateway.readFile(parseRemotePath(`${revisionRoot}/settings.json`)),
+		).resolves.toEqual(Buffer.from('second'));
+		expect(
+			await gateway.exists(parseRemotePath(`${root}/revisions/${first.manifest.revision}`)),
+		).toBe(false);
+	});
+
+	it('converges when an uncertain COPY failure follows a completed copy', async () => {
+		const { gateway, root, server, store } = await createStore();
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') },
+				{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+				{ contents: Buffer.from('stale'), path: parseManifestPath('themes/stale.txt') },
+			],
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		const failingGateway = overrideGateway(gateway, {
+			copyPath: async (source, destination, options) => {
+				await gateway.copyPath(source, destination, options);
+				throw new WebDavRequestError('WebDAV COPY failed with HTTP status 502', {
+					retryable: true,
+					status: 502,
+				});
+			},
+		});
+
+		const second = await new RemoteStore(failingGateway, root).publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: snapshot.sha256,
+			files: [
+				{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') },
+				{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+			],
+		});
+		expect(second.copyFallbackEntries).toEqual([parseManifestPath('themes')]);
+		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
+		const revisionRoot = `${root}/revisions/${second.manifest.revision}`;
+		expect(
+			server.requests.some(
+				(request) =>
+					request.method === 'DELETE' && request.pathname === `/dav/${revisionRoot}/themes`,
+			),
+		).toBe(true);
+		await expect(
+			gateway.readFile(parseRemotePath(`${revisionRoot}/themes/dark.txt`)),
+		).resolves.toEqual(Buffer.from('dark'));
+		await expect(gateway.exists(parseRemotePath(`${revisionRoot}/themes/stale.txt`))).resolves.toBe(
+			false,
+		);
 		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toEqual([
-			{ basename: first.manifest.revision, type: 'directory' },
+			{ basename: second.manifest.revision, type: 'directory' },
 		]);
 	});
 
-	it('removes a partially copied inactive revision after COPY failure', async () => {
+	it('keeps push fatal when a fallback entry cannot be removed', async () => {
 		const { gateway, root, store } = await createStore();
 		const first = await store.publishRevision({
 			allowUnverifiedManifest: false,
@@ -240,10 +299,19 @@ describe('remote store', () => {
 		const failingGateway = overrideGateway(gateway, {
 			copyPath: async (source, destination, options) => {
 				await gateway.copyPath(source, destination, options);
-				throw new WebDavRequestError('WebDAV COPY failed with HTTP status 207', {
-					retryable: false,
-					status: 207,
+				throw new WebDavRequestError('WebDAV COPY failed with HTTP status 502', {
+					retryable: true,
+					status: 502,
 				});
+			},
+			deletePath: async (path, options) => {
+				if (path.endsWith('/themes')) {
+					throw new WebDavRequestError('WebDAV request failed with HTTP status 500', {
+						retryable: true,
+						status: 500,
+					});
+				}
+				await gateway.deletePath(path, options);
 			},
 		});
 
@@ -256,11 +324,136 @@ describe('remote store', () => {
 					{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
 				],
 			}),
-		).rejects.toMatchObject({ status: 207 });
+		).rejects.toMatchObject({ status: 500 });
 		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
 		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toEqual([
 			{ basename: first.manifest.revision, type: 'directory' },
 		]);
+	});
+
+	it('keeps COPY authentication failures fatal without fallback', async () => {
+		const { gateway, root, server, store } = await createStore();
+		const first = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') },
+				{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+			],
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		server.failNext('COPY', `${root}/revisions/${first.manifest.revision}/themes`, 403);
+
+		await expect(
+			store.publishRevision({
+				allowUnverifiedManifest: false,
+				expectedManifestSha256: snapshot.sha256,
+				files: [
+					{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') },
+					{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+				],
+			}),
+		).rejects.toMatchObject({ status: 403 });
+		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
+		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toEqual([
+			{ basename: first.manifest.revision, type: 'directory' },
+		]);
+	});
+
+	it('keeps status-less COPY errors fatal without fallback', async () => {
+		const { gateway, root, store } = await createStore();
+		const first = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('first'), path: parseManifestPath('settings.json') },
+				{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+			],
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		const failingGateway = overrideGateway(gateway, {
+			copyPath: async () => {
+				throw new WebDavRequestError('WebDAV network request failed', { retryable: true });
+			},
+		});
+
+		await expect(
+			new RemoteStore(failingGateway, root).publishRevision({
+				allowUnverifiedManifest: false,
+				expectedManifestSha256: snapshot.sha256,
+				files: [
+					{ contents: Buffer.from('second'), path: parseManifestPath('settings.json') },
+					{ contents: Buffer.from('dark'), path: parseManifestPath('themes/dark.txt') },
+				],
+			}),
+		).rejects.toThrow('WebDAV network request failed');
+		expect((await store.readManifest())?.manifest).toEqual(first.manifest);
+		expect(await gateway.directoryContents(parseRemotePath(`${root}/revisions`))).toEqual([
+			{ basename: first.manifest.revision, type: 'directory' },
+		]);
+	});
+
+	it('falls back per entry while other entries keep using COPY', async () => {
+		const { gateway, root, server, store } = await createStore();
+		const first = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('util-v1'), path: parseManifestPath('lib/util.js') },
+				{ contents: Buffer.from('a'), path: parseManifestPath('keep/a.txt') },
+				{ contents: Buffer.from('logo'), path: parseManifestPath('themes/logo.txt') },
+				{ contents: Buffer.from('stale'), path: parseManifestPath('themes/stale.css') },
+			],
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		server.requests.splice(0);
+		server.failNext('COPY', `${root}/revisions/${first.manifest.revision}/themes`, 502);
+
+		const second = await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: snapshot.sha256,
+			files: [
+				{ contents: Buffer.from('a'), path: parseManifestPath('keep/a.txt') },
+				{ contents: Buffer.from('util-v2'), path: parseManifestPath('lib/util.js') },
+				{ contents: Buffer.from('v2'), path: parseManifestPath('themes/base.css') },
+				{ contents: Buffer.from('logo'), path: parseManifestPath('themes/logo.txt') },
+			],
+		});
+		expect(second.copyFallbackEntries).toEqual([parseManifestPath('themes')]);
+		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
+		const revisionRoot = `${root}/revisions/${second.manifest.revision}`;
+		await expect(gateway.readFile(parseRemotePath(`${revisionRoot}/lib/util.js`))).resolves.toEqual(
+			Buffer.from('util-v2'),
+		);
+		await expect(gateway.readFile(parseRemotePath(`${revisionRoot}/keep/a.txt`))).resolves.toEqual(
+			Buffer.from('a'),
+		);
+		await expect(
+			gateway.readFile(parseRemotePath(`${revisionRoot}/themes/logo.txt`)),
+		).resolves.toEqual(Buffer.from('logo'));
+		await expect(
+			gateway.readFile(parseRemotePath(`${revisionRoot}/themes/base.css`)),
+		).resolves.toEqual(Buffer.from('v2'));
+		await expect(gateway.exists(parseRemotePath(`${revisionRoot}/themes/stale.css`))).resolves.toBe(
+			false,
+		);
+		const copyRequests = server.requests.filter((request) => request.method === 'COPY');
+		expect(copyRequests).toHaveLength(2);
+		expect(copyRequests.every((request) => /\/(keep|themes)$/u.test(request.pathname))).toBe(true);
+		expect(
+			server.requests.filter(
+				(request) => request.method === 'DELETE' && request.pathname.includes('/themes/'),
+			),
+		).toEqual([]);
 	});
 
 	it('rebuilds paths that change between files and directories', async () => {

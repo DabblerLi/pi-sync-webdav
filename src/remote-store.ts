@@ -82,8 +82,14 @@ export interface PublishRevisionInput {
 }
 
 export interface PublishRevisionResult {
+	readonly copyFallbackEntries: readonly SafeRelativePath[];
 	readonly manifest: ManifestV1;
 	readonly previousRevisionCleanup: 'deleted' | 'failed' | 'not-applicable' | 'retained';
+}
+
+interface PreparedRevisionFile extends RevisionFile {
+	readonly sha256: string;
+	readonly size: number;
 }
 
 interface WriteCapabilityResult {
@@ -223,6 +229,42 @@ function manifestDirectories(manifest: ManifestV1): readonly SafeRelativePath[] 
 
 function topLevelPath(path: SafeRelativePath): SafeRelativePath {
 	return parseManifestPath(path.split('/')[0]);
+}
+
+// Definite rejections fall back because the server refused the operation
+// itself; authentication failures, a missing source revision, and status-less
+// errors (timeouts, cancellations) leave the state unclear and must stay fatal.
+function copyFallbackStatus(error: unknown): number | undefined {
+	return error instanceof WebDavRequestError &&
+		error.status !== undefined &&
+		error.status !== 401 &&
+		error.status !== 403 &&
+		error.status !== 404
+		? error.status
+		: undefined;
+}
+
+// 405 and 501 mean the server implements no COPY at all, so remaining attempts
+// would fail the same way; other rejections can be specific to one entry.
+function isCopyUnsupportedStatus(status: number): boolean {
+	return status === 405 || status === 501;
+}
+
+function withFallbackEntryFiles(
+	preparedFiles: readonly PreparedRevisionFile[],
+	filesToUpload: readonly PreparedRevisionFile[],
+	fallbackEntries: readonly SafeRelativePath[],
+): readonly PreparedRevisionFile[] {
+	const pendingPaths = new Set(filesToUpload.map((file) => file.path));
+	const fallbackSet = new Set(fallbackEntries);
+	const uploadFiles = [...filesToUpload];
+	for (const file of preparedFiles) {
+		if (!pendingPaths.has(file.path) && fallbackSet.has(topLevelPath(file.path))) {
+			pendingPaths.add(file.path);
+			uploadFiles.push(file);
+		}
+	}
+	return uploadFiles;
 }
 
 function planRevisionReuse(
@@ -475,15 +517,25 @@ export class RemoteStore {
 		});
 		let manifestWriteStarted = false;
 		let manifestWriteCompleted = false;
+		let copyFallbackEntries: readonly SafeRelativePath[] = [];
 
 		try {
 			if (previousManifest === undefined) {
 				await this.#ensureRevisionDirectory(revisionPath, manifest, options);
 			} else {
-				await this.#reuseRevisionContents(previousManifest, revisionPath, manifest, options);
+				copyFallbackEntries = await this.#reuseRevisionContents(
+					previousManifest,
+					revisionPath,
+					manifest,
+					options,
+				);
 			}
+			const uploadFiles =
+				copyFallbackEntries.length === 0
+					? filesToUpload
+					: withFallbackEntryFiles(preparedFiles, filesToUpload, copyFallbackEntries);
 			let completedUploads = 0;
-			await mapConcurrent(filesToUpload, FILE_OPERATION_CONCURRENCY, async (file) => {
+			await mapConcurrent(uploadFiles, FILE_OPERATION_CONCURRENCY, async (file) => {
 				throwIfCancelled(options);
 				const remoteFile = remoteChild(revisionPath, file.path);
 				await this.#gateway.writeFile(
@@ -502,7 +554,7 @@ export class RemoteStore {
 				reportProgress(options, {
 					completed: completedUploads,
 					phase: 'uploading',
-					total: filesToUpload.length,
+					total: uploadFiles.length,
 				});
 			});
 
@@ -528,7 +580,11 @@ export class RemoteStore {
 				previousManifest,
 				options,
 			);
-			return { manifest, previousRevisionCleanup };
+			return {
+				copyFallbackEntries,
+				manifest,
+				previousRevisionCleanup,
+			};
 		} catch (error: unknown) {
 			const cleanup = cleanupOptions(options);
 			if (manifestWriteStarted) {
@@ -539,7 +595,11 @@ export class RemoteStore {
 							previousManifest,
 							cleanup,
 						);
-						return { manifest, previousRevisionCleanup };
+						return {
+							copyFallbackEntries,
+							manifest,
+							previousRevisionCleanup,
+						};
 					}
 				} catch {
 					throw new RemoteCommitUnknownError();
@@ -736,27 +796,80 @@ export class RemoteStore {
 		revisionPath: RemotePath,
 		manifest: ManifestV1,
 		options?: RemoteOperationOptions,
-	): Promise<void> {
+	): Promise<readonly SafeRelativePath[]> {
 		await this.#ensureRevisionRoot(revisionPath, options);
 		const plan = planRevisionReuse(previousManifest, manifest);
 		const previousRevisionPath = this.#revisionPath(previousManifest.revision);
-		await mapConcurrent(plan.copyPaths, FILE_OPERATION_CONCURRENCY, (path) =>
-			this.#gateway.copyPath(
-				remoteChild(previousRevisionPath, path),
-				remoteChild(revisionPath, path),
-				requestOptions(options),
-			),
+		const fallbackEntries = new Set<SafeRelativePath>();
+		let copyUnsupported = false;
+		await mapConcurrent(plan.copyPaths, FILE_OPERATION_CONCURRENCY, async (path) => {
+			if (copyUnsupported) {
+				fallbackEntries.add(path);
+				return;
+			}
+			try {
+				await this.#gateway.copyPath(
+					remoteChild(previousRevisionPath, path),
+					remoteChild(revisionPath, path),
+					requestOptions(options),
+				);
+			} catch (error: unknown) {
+				const status = copyFallbackStatus(error);
+				if (status === undefined) {
+					throw error;
+				}
+				fallbackEntries.add(path);
+				copyUnsupported = isCopyUnsupportedStatus(status);
+			}
+		});
+		// Fallback entries are removed and rebuilt wholesale, so stale-file
+		// deletions and standalone directory creation skip them.
+		const deletionPaths = plan.deletionPaths.filter(
+			(path) => !fallbackEntries.has(topLevelPath(path)),
 		);
-		await mapConcurrent(plan.deletionPaths, FILE_OPERATION_CONCURRENCY, (path) =>
+		await mapConcurrent(deletionPaths, FILE_OPERATION_CONCURRENCY, (path) =>
 			this.#gateway.deletePath(remoteChild(revisionPath, path), requestOptions(options)),
 		);
 
 		for (const directory of plan.directoriesToCreate) {
+			if (fallbackEntries.has(topLevelPath(directory))) {
+				continue;
+			}
 			throwIfCancelled(options);
 			await this.#gateway.createDirectory(
 				remoteChild(revisionPath, directory),
 				requestOptions(options),
 			);
+		}
+		if (fallbackEntries.size > 0) {
+			// A failed COPY may have applied partially or fully, so each fallback
+			// entry is removed before rebuilding to keep the revision free of files
+			// outside the manifest.
+			await mapConcurrent([...fallbackEntries], FILE_OPERATION_CONCURRENCY, (entry) =>
+				this.#removeFallbackEntry(remoteChild(revisionPath, entry), options),
+			);
+			for (const directory of manifestDirectories(manifest)) {
+				if (!fallbackEntries.has(topLevelPath(directory))) {
+					continue;
+				}
+				throwIfCancelled(options);
+				await this.#gateway.createDirectory(
+					remoteChild(revisionPath, directory),
+					requestOptions(options),
+				);
+			}
+		}
+		return [...fallbackEntries].sort();
+	}
+
+	// A missing entry only means the COPY never applied.
+	async #removeFallbackEntry(path: RemotePath, options?: RemoteOperationOptions): Promise<void> {
+		try {
+			await this.#gateway.deletePath(path, requestOptions(options));
+		} catch (error: unknown) {
+			if (!(error instanceof WebDavRequestError && error.status === 404)) {
+				throw error;
+			}
 		}
 	}
 
