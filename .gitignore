@@ -15,7 +15,6 @@ reports/
 *.pem
 *.key
 .pi/
-.pi-subagents/
 
 # Logs
 npm-debug.log*
