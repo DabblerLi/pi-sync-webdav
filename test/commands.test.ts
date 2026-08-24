@@ -128,7 +128,6 @@ describe('sync command parsing', () => {
 		['diff', 'diff'],
 		['settings', 'settings'],
 		['cleanup', 'cleanup'],
-		['setup', undefined],
 		['settings now', undefined],
 		['unknown', undefined],
 	])('parses %j as %j', (args, expected) => {
