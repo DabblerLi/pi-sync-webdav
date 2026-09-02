@@ -6,7 +6,7 @@ Read `docs/design.md` before changing implementation code. Treat the following a
 
 - The package currently supports one manually initiated Basic Auth WebDAV target.
 - Pushes publish a complete new revision; when a current revision exists, they reuse unchanged top-level entries with WebDAV `COPY`, upload changed files, and activate it through `manifest.json`.
-- Local backups, safe pull deletion based on matching `syncState`, path validation, and symlink protection are part of the current safety model.
+- Local backups, safe pull deletion based on matching `syncState`, path validation, symlink protection, and destination case-sensitivity handling are part of the current safety model.
 - Top-level `npm/`, `git/`, and `pi-sync-webdav/` directories are excluded from synchronization. `logs/` and `node_modules/` are excluded at every depth.
 - File reads, validation, uploads, and downloads use bounded concurrency. Manifest activation, local application, backups, and rollback remain serial.
 
@@ -20,6 +20,7 @@ Read `docs/design.md` before changing implementation code. Treat the following a
 ## Public delivery
 
 - Write public documentation for readers: avoid future plans, process narration, unnecessary implementation detail, and backward-compatibility discussion.
+- Documentation and code comments describe current behavior only: no change history and no design rationale.
 - `README.md` is English and `README.zh-CN.md` is its Chinese translation; both link to the other language at the top.
 - The current delivery uses tag-triggered npm publishing through `.github/workflows/publish.yml` and does not include GitHub Releases, Changesets, or a changelog.
 
