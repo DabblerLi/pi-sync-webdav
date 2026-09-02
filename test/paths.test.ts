@@ -4,8 +4,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+	assertNoPathCollisions,
 	assertSafeLocalTarget,
 	encodeRemotePath,
+	findPathCollisions,
 	normalizeConnection,
 	parseManifestPath,
 	parsePushInclude,
@@ -18,6 +20,34 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
 	await Promise.all(temporaryDirectories.splice(0).map(removeTemporaryDirectory));
+});
+
+describe('path collisions', () => {
+	it('finds case-folded, duplicate, and nested collisions in insertion order', () => {
+		const caseFolded = ['Themes/dark.json', 'themes/dark.json'].map(parseManifestPath);
+		expect(findPathCollisions(caseFolded)).toEqual([
+			[parseManifestPath('Themes/dark.json'), parseManifestPath('themes/dark.json')],
+		]);
+		expect(findPathCollisions(caseFolded, false)).toEqual([]);
+
+		const nested = ['a/file.json', 'a', 'b', 'b/c.json'].map(parseManifestPath);
+		expect(findPathCollisions(nested, false)).toEqual([
+			[parseManifestPath('a/file.json'), parseManifestPath('a')],
+			[parseManifestPath('b'), parseManifestPath('b/c.json')],
+		]);
+		expect(
+			findPathCollisions([parseManifestPath('a'), parseManifestPath('b/c.json')], false),
+		).toEqual([]);
+	});
+
+	it('reports the first colliding pair when asserting', () => {
+		expect(() =>
+			assertNoPathCollisions(
+				[parseManifestPath('themes/dark.json'), parseManifestPath('themes')],
+				'Invalid plugin configuration',
+			),
+		).toThrow("Invalid plugin configuration: 'themes/dark.json' and 'themes'");
+	});
 });
 
 describe('normalizeConnection', () => {

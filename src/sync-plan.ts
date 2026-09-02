@@ -19,6 +19,7 @@ import {
 	assertNoPathCollisions,
 	assertSafeLocalTarget,
 	parseManifestPath,
+	pathsCollide,
 	type SafeRelativePath,
 } from './paths.js';
 import type { RemoteManifestSnapshot } from './remote-store.js';
@@ -68,7 +69,7 @@ export interface PullPlan {
 
 export interface PlanPullInput {
 	readonly agentRoot: string;
-	readonly caseInsensitiveDestination?: boolean;
+	readonly caseInsensitiveDestination: boolean;
 	readonly connectionFingerprint: string;
 	readonly manifest: ManifestV1;
 	readonly operation?: OperationOptions;
@@ -79,7 +80,7 @@ function sha256(contents: Buffer): string {
 	return createHash('sha256').update(contents).digest('hex');
 }
 
-function comparePaths(left: SafeRelativePath, right: SafeRelativePath): number {
+function comparePaths(left: string, right: string): number {
 	if (left === right) {
 		return 0;
 	}
@@ -106,10 +107,6 @@ function isMissingPath(error: unknown): error is NodeJS.ErrnoException {
 		'code' in error &&
 		(error as { readonly code?: unknown }).code === 'ENOENT'
 	);
-}
-
-function localDestinationKey(path: SafeRelativePath, caseInsensitiveDestination: boolean): string {
-	return caseInsensitiveDestination ? path.toLocaleLowerCase('en-US') : path;
 }
 
 async function observeLocalFile(
@@ -228,44 +225,28 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 	input.operation?.onProgress?.({ phase: 'preparing' });
 	throwIfOperationCancelled(input.operation?.signal);
 	const manifest = validateManifest(input.manifest);
-	const caseInsensitiveDestination = input.caseInsensitiveDestination ?? true;
-	assertNoPathCollisions(
-		manifest.files.map((file) => file.path),
-		'Remote manifest contains colliding local paths',
-		caseInsensitiveDestination,
-	);
-
+	const fold = (path: SafeRelativePath): string =>
+		input.caseInsensitiveDestination ? path.toLocaleLowerCase('en-US') : path;
 	const manifestPaths = new Set(manifest.files.map((file) => file.path));
-	const manifestPathsByDestination = new Map(
-		manifest.files.map((file) => [
-			localDestinationKey(file.path, caseInsensitiveDestination),
-			file.path,
-		]),
-	);
 	const deletionCandidates: SafeRelativePath[] = [];
+	const pairedManifestPaths = new Set<SafeRelativePath>();
 	if (
 		input.syncState !== undefined &&
 		input.syncState.connectionFingerprint === input.connectionFingerprint
 	) {
 		for (const rawPath of input.syncState.managedPaths) {
 			const path = parseManifestPath(rawPath);
-			const manifestPath = manifestPathsByDestination.get(
-				localDestinationKey(path, caseInsensitiveDestination),
-			);
-			if (manifestPath !== undefined) {
-				if (manifestPath !== path) {
-					throw new Error('Managed paths collide with remote local destinations');
-				}
+			if (manifestPaths.has(path)) {
 				continue;
 			}
 			deletionCandidates.push(path);
+			for (const file of manifest.files) {
+				if (pathsCollide(path, file.path, input.caseInsensitiveDestination)) {
+					pairedManifestPaths.add(file.path);
+				}
+			}
 		}
 	}
-	assertNoPathCollisions(
-		[...manifest.files.map((file) => file.path), ...deletionCandidates],
-		'Managed paths collide with remote local destinations',
-		caseInsensitiveDestination,
-	);
 
 	const actions: FileMutation[] = [];
 	const downloads: ManifestFile[] = [];
@@ -286,9 +267,25 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 	const manifestObservations = await mapConcurrent(
 		manifest.files,
 		FILE_OPERATION_CONCURRENCY,
-		(file) => observeAndCount(file.path),
+		async (file) => {
+			if (pairedManifestPaths.has(file.path)) {
+				return undefined;
+			}
+			return observeAndCount(file.path);
+		},
 	);
 	for (const [index, file] of manifest.files.entries()) {
+		if (pairedManifestPaths.has(file.path)) {
+			// A removal paired with this destination is applied before the replacement.
+			actions.push({
+				action: 'add',
+				expectedLocal: { kind: 'absent' },
+				path: file.path,
+				source: file,
+			});
+			downloads.push(file);
+			continue;
+		}
 		const local = manifestObservations[index];
 		if (local === undefined) {
 			actions.push({
@@ -340,8 +337,14 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 		}
 	}
 
+	const actionRank = (action: PlannedAction): number => (action === 'delete' ? 0 : 1);
 	return {
-		actions: actions.sort((left, right) => comparePaths(left.path, right.path)),
+		actions: actions.sort(
+			(left, right) =>
+				actionRank(left.action) - actionRank(right.action) ||
+				comparePaths(fold(left.path), fold(right.path)) ||
+				comparePaths(left.path, right.path),
+		),
 		downloads: downloads.sort((left, right) => comparePaths(left.path, right.path)),
 		nextManagedPaths: [...manifestPaths].sort(comparePaths),
 	};

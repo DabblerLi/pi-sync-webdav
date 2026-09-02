@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { chmod, truncate, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, truncate, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -15,6 +15,11 @@ const temporaryDirectories: string[] = [];
 
 function sha256(contents: Buffer): string {
 	return createHash('sha256').update(contents).digest('hex');
+}
+
+function expected(contents: string) {
+	const buffer = Buffer.from(contents, 'utf8');
+	return { kind: 'file' as const, sha256: sha256(buffer), size: buffer.byteLength };
 }
 
 function localFile(path: string, contents: string): CollectedLocalFile {
@@ -85,7 +90,7 @@ describe('push planning', () => {
 				]),
 				remote: undefined,
 			}),
-		).toThrow('Local selection contains colliding destinations');
+		).toThrow("Local selection contains colliding destinations: 'Themes/dark.json' and 'themes'");
 	});
 });
 
@@ -106,18 +111,21 @@ describe('pull planning', () => {
 
 		const matchingPlan = await planPull({
 			agentRoot: root,
+			caseInsensitiveDestination: false,
 			connectionFingerprint: 'b'.repeat(64),
 			manifest: remoteManifest,
 			syncState,
 		});
 		const changedConnectionPlan = await planPull({
 			agentRoot: root,
+			caseInsensitiveDestination: false,
 			connectionFingerprint: 'c'.repeat(64),
 			manifest: remoteManifest,
 			syncState,
 		});
 		const firstPullPlan = await planPull({
 			agentRoot: root,
+			caseInsensitiveDestination: false,
 			connectionFingerprint: 'b'.repeat(64),
 			manifest: remoteManifest,
 			syncState: undefined,
@@ -137,6 +145,121 @@ describe('pull planning', () => {
 		expect(matchingPlan.nextManagedPaths).toEqual(['settings.json', 'themes/new.json']);
 	});
 
+	it('applies a managed removal before its case-renamed replacement', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-plan-');
+		temporaryDirectories.push(root);
+		await writeFile(join(root, 'Themes.json'), 'old', 'utf8');
+		const remoteManifest = manifest([{ contents: 'new', path: 'themes.json' }]);
+
+		const plan = await planPull({
+			agentRoot: root,
+			caseInsensitiveDestination: true,
+			connectionFingerprint: 'a'.repeat(64),
+			manifest: remoteManifest,
+			syncState: {
+				connectionFingerprint: 'a'.repeat(64),
+				managedPaths: [parseManifestPath('Themes.json')],
+			},
+		});
+
+		expect(plan.actions).toEqual([
+			{
+				action: 'delete',
+				expectedLocal: expected('old'),
+				path: parseManifestPath('Themes.json'),
+				source: undefined,
+			},
+			{
+				action: 'add',
+				expectedLocal: { kind: 'absent' },
+				path: parseManifestPath('themes.json'),
+				source: remoteManifest.files[0],
+			},
+		]);
+		expect(plan.downloads.map((file) => file.path)).toEqual(['themes.json']);
+		expect(plan.nextManagedPaths).toEqual(['themes.json']);
+	});
+
+	it('re-downloads a case-renamed replacement whose contents already match', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-plan-');
+		temporaryDirectories.push(root);
+		await writeFile(join(root, 'Themes.json'), 'same', 'utf8');
+
+		const plan = await planPull({
+			agentRoot: root,
+			caseInsensitiveDestination: true,
+			connectionFingerprint: 'a'.repeat(64),
+			manifest: manifest([{ contents: 'same', path: 'themes.json' }]),
+			syncState: {
+				connectionFingerprint: 'a'.repeat(64),
+				managedPaths: [parseManifestPath('Themes.json')],
+			},
+		});
+
+		expect(plan.actions.map((action) => [action.path, action.action])).toEqual([
+			['Themes.json', 'delete'],
+			['themes.json', 'add'],
+		]);
+		expect(plan.downloads.map((file) => file.path)).toEqual(['themes.json']);
+	});
+
+	it('pairs file-versus-directory and directory-versus-file destination changes', async () => {
+		const fileToDirectoryRoot = await createTemporaryDirectory('pi-sync-webdav-plan-');
+		temporaryDirectories.push(fileToDirectoryRoot);
+		await writeFile(join(fileToDirectoryRoot, 'Themes'), 'old file', 'utf8');
+		const fileToDirectoryPlan = await planPull({
+			agentRoot: fileToDirectoryRoot,
+			caseInsensitiveDestination: true,
+			connectionFingerprint: 'a'.repeat(64),
+			manifest: manifest([{ contents: 'new', path: 'themes/new.json' }]),
+			syncState: {
+				connectionFingerprint: 'a'.repeat(64),
+				managedPaths: [parseManifestPath('Themes')],
+			},
+		});
+		expect(fileToDirectoryPlan.actions.map((action) => [action.path, action.action])).toEqual([
+			['Themes', 'delete'],
+			['themes/new.json', 'add'],
+		]);
+
+		const directoryToFileRoot = await createTemporaryDirectory('pi-sync-webdav-plan-');
+		temporaryDirectories.push(directoryToFileRoot);
+		await mkdir(join(directoryToFileRoot, 'assets'));
+		await writeFile(join(directoryToFileRoot, 'assets', 'old.json'), 'old', 'utf8');
+		const directoryToFilePlan = await planPull({
+			agentRoot: directoryToFileRoot,
+			caseInsensitiveDestination: true,
+			connectionFingerprint: 'a'.repeat(64),
+			manifest: manifest([{ contents: 'new', path: 'assets' }]),
+			syncState: {
+				connectionFingerprint: 'a'.repeat(64),
+				managedPaths: [parseManifestPath('assets/old.json')],
+			},
+		});
+		expect(directoryToFilePlan.actions.map((action) => [action.path, action.action])).toEqual([
+			['assets/old.json', 'delete'],
+			['assets', 'add'],
+		]);
+
+		const sameSpellingRoot = await createTemporaryDirectory('pi-sync-webdav-plan-');
+		temporaryDirectories.push(sameSpellingRoot);
+		await writeFile(join(sameSpellingRoot, 'styles'), 'old file', 'utf8');
+		const sameSpellingPlan = await planPull({
+			agentRoot: sameSpellingRoot,
+			caseInsensitiveDestination: false,
+			connectionFingerprint: 'a'.repeat(64),
+			manifest: manifest([{ contents: 'new', path: 'styles/new.json' }]),
+			syncState: {
+				connectionFingerprint: 'a'.repeat(64),
+				managedPaths: [parseManifestPath('styles')],
+			},
+		});
+		expect(sameSpellingPlan.actions.map((action) => [action.path, action.action])).toEqual([
+			['styles', 'delete'],
+			['styles/new.json', 'add'],
+		]);
+	});
+
 	it('plans an explicit auth.json permission repair when matching content is not owner-only', async () => {
 		if (process.platform === 'win32') {
 			return;
@@ -149,6 +272,7 @@ describe('pull planning', () => {
 
 		const insecurePlan = await planPull({
 			agentRoot: root,
+			caseInsensitiveDestination: false,
 			connectionFingerprint: 'a'.repeat(64),
 			manifest: remoteManifest,
 			syncState: undefined,
@@ -161,6 +285,7 @@ describe('pull planning', () => {
 		await expect(
 			planPull({
 				agentRoot: root,
+				caseInsensitiveDestination: false,
 				connectionFingerprint: 'a'.repeat(64),
 				manifest: remoteManifest,
 				syncState: undefined,
@@ -182,6 +307,7 @@ describe('pull planning', () => {
 			await expect(
 				planPull({
 					agentRoot: root,
+					caseInsensitiveDestination: false,
 					connectionFingerprint: 'a'.repeat(64),
 					manifest: manifest([{ contents: 'private', path: 'auth.json' }]),
 					syncState: undefined,
@@ -192,49 +318,6 @@ describe('pull planning', () => {
 		} finally {
 			Object.defineProperty(process, 'platform', originalPlatform);
 		}
-	});
-
-	it('protects sync-state deletions from case-insensitive destination collisions', async () => {
-		const root = await createTemporaryDirectory('pi-sync-webdav-plan-');
-		temporaryDirectories.push(root);
-		const state: SyncState = {
-			connectionFingerprint: 'a'.repeat(64),
-			managedPaths: [parseManifestPath('Themes')],
-		};
-
-		await expect(
-			planPull({
-				agentRoot: root,
-				caseInsensitiveDestination: true,
-				connectionFingerprint: 'a'.repeat(64),
-				manifest: manifest([{ contents: 'new', path: 'themes/new.json' }]),
-				syncState: state,
-			}),
-		).rejects.toThrow('Managed paths collide with remote local destinations');
-		await expect(
-			planPull({
-				agentRoot: root,
-				caseInsensitiveDestination: true,
-				connectionFingerprint: 'a'.repeat(64),
-				manifest: manifest([{ contents: 'new', path: 'themes.json' }]),
-				syncState: {
-					connectionFingerprint: 'a'.repeat(64),
-					managedPaths: [parseManifestPath('Themes.json')],
-				},
-			}),
-		).rejects.toThrow('Managed paths collide with remote local destinations');
-		await expect(
-			planPull({
-				agentRoot: root,
-				caseInsensitiveDestination: true,
-				connectionFingerprint: 'a'.repeat(64),
-				manifest: manifest([]),
-				syncState: {
-					connectionFingerprint: 'a'.repeat(64),
-					managedPaths: [parseManifestPath('Old.json'), parseManifestPath('old.json')],
-				},
-			}),
-		).rejects.toThrow('Managed paths collide with remote local destinations');
 	});
 
 	it('repairs auth.json permissions when special permission bits are present', async () => {
@@ -249,6 +332,7 @@ describe('pull planning', () => {
 		await expect(
 			planPull({
 				agentRoot: root,
+				caseInsensitiveDestination: false,
 				connectionFingerprint: 'a'.repeat(64),
 				manifest: manifest([{ contents: 'private', path: 'auth.json' }]),
 				syncState: undefined,
@@ -273,6 +357,7 @@ describe('pull planning', () => {
 		await expect(
 			planPull({
 				agentRoot: root,
+				caseInsensitiveDestination: false,
 				connectionFingerprint: 'a'.repeat(64),
 				manifest: remoteManifest,
 				syncState: undefined,
@@ -281,6 +366,7 @@ describe('pull planning', () => {
 		await expect(
 			planPull({
 				agentRoot: root,
+				caseInsensitiveDestination: false,
 				connectionFingerprint: 'a'.repeat(64),
 				manifest: manifest([]),
 				syncState: {
@@ -299,6 +385,7 @@ describe('pull planning', () => {
 		await expect(
 			planPull({
 				agentRoot: root,
+				caseInsensitiveDestination: false,
 				connectionFingerprint: 'a'.repeat(64),
 				manifest: manifest([{ contents: 'new', path: 'themes/new.json' }]),
 				syncState: undefined,

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -9,6 +9,7 @@ import {
 	applyPullPlan,
 	applyRestorePlan,
 	createPullWorkspace,
+	detectCaseInsensitiveDestination,
 	disposePullWorkspace,
 	listBackups,
 	planRestore,
@@ -176,6 +177,119 @@ describe('pull transaction', () => {
 		expect(await readFile(join(root, 'pi-sync-webdav', 'backups', 'settings.json'), 'utf8')).toBe(
 			'old settings',
 		);
+		await disposePullWorkspace(root, workspace);
+	});
+
+	it('detects destination case sensitivity without leaving probe files', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+
+		const caseInsensitive = await detectCaseInsensitiveDestination(root);
+
+		expect(caseInsensitive).toBe(process.platform === 'win32' || process.platform === 'darwin');
+		expect(await readdir(join(root, 'pi-sync-webdav'))).toEqual([]);
+	});
+
+	it('removes directories emptied by managed deletions and keeps populated ones', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		await mkdir(join(root, 'gone'));
+		await writeFile(join(root, 'gone', 'old.json'), 'old', 'utf8');
+		await mkdir(join(root, 'kept'));
+		await writeFile(join(root, 'kept', 'old.json'), 'old', 'utf8');
+		await writeFile(join(root, 'kept', 'user.json'), 'user', 'utf8');
+		const workspace = await createPullWorkspace(root);
+		const plan: PullPlan = {
+			actions: [
+				{
+					action: 'delete',
+					expectedLocal: expected('old'),
+					path: parseManifestPath('gone/old.json'),
+					source: undefined,
+				},
+				{
+					action: 'delete',
+					expectedLocal: expected('old'),
+					path: parseManifestPath('kept/old.json'),
+					source: undefined,
+				},
+			],
+			downloads: [],
+			nextManagedPaths: [],
+		};
+
+		await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({ status: 'applied' });
+
+		await expect(stat(join(root, 'gone'))).rejects.toMatchObject({ code: 'ENOENT' });
+		expect((await stat(join(root, 'kept'))).isDirectory()).toBe(true);
+		expect(await readFile(join(root, 'kept', 'user.json'), 'utf8')).toBe('user');
+		await disposePullWorkspace(root, workspace);
+	});
+
+	it('applies a case-renamed replacement after removing the managed old spelling', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		await writeFile(join(root, 'Themes.json'), 'old', 'utf8');
+		const manifest = createManifest([{ contents: 'new', path: 'themes.json' }]);
+		const workspace = await stageManifest(root, manifest, new Map([['themes.json', 'new']]));
+		const plan: PullPlan = {
+			actions: [
+				{
+					action: 'delete',
+					expectedLocal: expected('old'),
+					path: parseManifestPath('Themes.json'),
+					source: undefined,
+				},
+				{
+					action: 'add',
+					expectedLocal: { kind: 'absent' },
+					path: parseManifestPath('themes.json'),
+					source: source(manifest, 'themes.json'),
+				},
+			],
+			downloads: manifest.files,
+			nextManagedPaths: manifest.files.map((file) => file.path),
+		};
+
+		await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({ status: 'applied' });
+		expect(await readFile(join(root, 'themes.json'), 'utf8')).toBe('new');
+		const backups = await listBackups(root);
+		expect(backups.map((backup) => backup.path)).toEqual(['Themes.json']);
+		expect(await readFile(join(root, 'pi-sync-webdav', 'backups', 'Themes.json'), 'utf8')).toBe(
+			'old',
+		);
+		await disposePullWorkspace(root, workspace);
+	});
+
+	it('applies a directory-to-file replacement after removing emptied directories', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+		temporaryDirectories.push(root);
+		await mkdir(join(root, 'assets'));
+		await writeFile(join(root, 'assets', 'old.json'), 'old', 'utf8');
+		const manifest = createManifest([{ contents: 'new', path: 'assets' }]);
+		const workspace = await stageManifest(root, manifest, new Map([['assets', 'new']]));
+		const plan: PullPlan = {
+			actions: [
+				{
+					action: 'delete',
+					expectedLocal: expected('old'),
+					path: parseManifestPath('assets/old.json'),
+					source: undefined,
+				},
+				{
+					action: 'add',
+					expectedLocal: { kind: 'absent' },
+					path: parseManifestPath('assets'),
+					source: source(manifest, 'assets'),
+				},
+			],
+			downloads: manifest.files,
+			nextManagedPaths: manifest.files.map((file) => file.path),
+		};
+
+		await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({ status: 'applied' });
+		expect((await stat(join(root, 'assets'))).isFile()).toBe(true);
+		expect(await readFile(join(root, 'assets'), 'utf8')).toBe('new');
 		await disposePullWorkspace(root, workspace);
 	});
 

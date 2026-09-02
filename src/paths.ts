@@ -51,41 +51,48 @@ function assertNonEmptyString(value: unknown, message: string): asserts value is
 	}
 }
 
-interface PathNode {
-	readonly children: Map<string, PathNode>;
-	terminal: boolean;
+export type PathCollision = readonly [SafeRelativePath, SafeRelativePath];
+
+function destinationKey(path: SafeRelativePath, caseInsensitive: boolean): string {
+	return caseInsensitive ? path.toLocaleLowerCase('en-US') : path;
 }
 
-function pathNode(): PathNode {
-	return { children: new Map(), terminal: false };
+export function pathsCollide(
+	left: SafeRelativePath,
+	right: SafeRelativePath,
+	caseInsensitive = true,
+): boolean {
+	const leftKey = destinationKey(left, caseInsensitive);
+	const rightKey = destinationKey(right, caseInsensitive);
+	return (
+		leftKey === rightKey || leftKey.startsWith(`${rightKey}/`) || rightKey.startsWith(`${leftKey}/`)
+	);
+}
+
+export function findPathCollisions(
+	paths: readonly SafeRelativePath[],
+	caseInsensitive = true,
+): readonly PathCollision[] {
+	const seen: SafeRelativePath[] = [];
+	const collisions: PathCollision[] = [];
+	for (const path of paths) {
+		for (const previous of seen) {
+			if (pathsCollide(previous, path, caseInsensitive)) {
+				collisions.push([previous, path]);
+			}
+		}
+		seen.push(path);
+	}
+	return collisions;
 }
 
 export function assertNoPathCollisions(
 	paths: readonly SafeRelativePath[],
 	errorMessage: string,
-	caseInsensitive = true,
 ): void {
-	const root = pathNode();
-	for (const path of paths) {
-		let node = root;
-		const components = path
-			.split('/')
-			.map((component) => (caseInsensitive ? component.toLocaleLowerCase('en-US') : component));
-		for (const component of components) {
-			if (node.terminal) {
-				throw new Error(errorMessage);
-			}
-			let child = node.children.get(component);
-			if (child === undefined) {
-				child = pathNode();
-				node.children.set(component, child);
-			}
-			node = child;
-		}
-		if (node.terminal || node.children.size > 0) {
-			throw new Error(errorMessage);
-		}
-		node.terminal = true;
+	const collision = findPathCollisions(paths).at(0);
+	if (collision !== undefined) {
+		throw new Error(`${errorMessage}: '${collision[0]}' and '${collision[1]}'`);
 	}
 }
 

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import { basename, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import type { ManifestFile } from './manifest.js';
 import { MAX_FILE_BYTES, MAX_OPERATION_BYTES } from './manifest.js';
@@ -75,6 +75,15 @@ function isAlreadyExistsPath(error: unknown): error is NodeJS.ErrnoException {
 		error !== null &&
 		'code' in error &&
 		(error as { readonly code?: unknown }).code === 'EEXIST'
+	);
+}
+
+function isNonEmptyDirectoryError(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		(error as { readonly code?: unknown }).code === 'ENOTEMPTY'
 	);
 }
 
@@ -533,7 +542,8 @@ async function writeAndRecordMutation(
 
 async function deleteActiveFile(agentRoot: string, path: SafeRelativePath): Promise<void> {
 	const root = assertSafeAgentRoot(agentRoot);
-	if (!(await inspectSafeDirectories(root, path.split('/').slice(0, -1), 'Unsafe local target'))) {
+	const parentSegments = path.split('/').slice(0, -1);
+	if (!(await inspectSafeDirectories(root, parentSegments, 'Unsafe local target'))) {
 		throw new Error('Local target changed');
 	}
 	const target = toAbsolutePath(root, path);
@@ -541,6 +551,38 @@ async function deleteActiveFile(agentRoot: string, path: SafeRelativePath): Prom
 		throw new Error('Local target changed');
 	}
 	await fs.unlink(target);
+	await removeEmptyAncestorDirectories(root, parentSegments);
+}
+
+async function removeEmptyAncestorDirectories(
+	root: string,
+	segments: readonly string[],
+): Promise<void> {
+	let directory = join(root, ...segments);
+	while (directory !== root) {
+		let entries: readonly string[];
+		try {
+			entries = await fs.readdir(directory);
+		} catch (error: unknown) {
+			if (isMissingPath(error)) {
+				directory = dirname(directory);
+				continue;
+			}
+			throw new Error('Unable to remove emptied directories', { cause: error });
+		}
+		if (entries.length > 0) {
+			return;
+		}
+		try {
+			await fs.rmdir(directory);
+		} catch (error: unknown) {
+			if (isNonEmptyDirectoryError(error)) {
+				return;
+			}
+			throw new Error('Unable to remove emptied directories', { cause: error });
+		}
+		directory = dirname(directory);
+	}
 }
 
 async function rollbackMutations(
@@ -610,6 +652,47 @@ export async function createPullWorkspace(agentRoot: string): Promise<PullWorksp
 	await fs.mkdir(directory, { mode: 0o700 });
 	await assertDirectory(directory, 'Unsafe pull workspace');
 	return { id };
+}
+
+export async function detectCaseInsensitiveDestination(agentRoot: string): Promise<boolean> {
+	const paths = await getPrivateDirectory(agentRoot);
+	const suffix = randomUUID();
+	const probePath = join(paths.directory, `Probe-${suffix}`);
+	const variantPath = join(paths.directory, `pROBE-${suffix}`);
+	let caseInsensitive = false;
+	let probeError: unknown;
+	try {
+		await fs.writeFile(probePath, '', { flag: 'wx', mode: 0o600 });
+	} catch (error: unknown) {
+		probeError = error;
+	}
+	if (probeError === undefined) {
+		try {
+			const entry = await fs.lstat(variantPath);
+			if (!entry.isFile() || entry.isSymbolicLink()) {
+				probeError = new Error('Unexpected case-sensitivity probe state');
+			} else {
+				caseInsensitive = true;
+			}
+		} catch (error: unknown) {
+			if (!isMissingPath(error)) {
+				probeError = error;
+			}
+		}
+	}
+	let cleanupError: unknown;
+	try {
+		await fs.rm(probePath, { force: true });
+	} catch (error: unknown) {
+		cleanupError = error;
+	}
+	if (probeError !== undefined) {
+		throw new Error('Unable to detect destination case sensitivity', { cause: probeError });
+	}
+	if (cleanupError !== undefined) {
+		throw new Error('Unable to remove the case-sensitivity probe', { cause: cleanupError });
+	}
+	return caseInsensitive;
 }
 
 export async function stageVerifiedFile(

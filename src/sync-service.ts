@@ -14,6 +14,7 @@ import {
 import {
 	applyPullPlan,
 	createPullWorkspace,
+	detectCaseInsensitiveDestination,
 	disposePullWorkspace,
 	stageVerifiedFile,
 	type ApplyResult,
@@ -245,8 +246,10 @@ export async function preparePull(
 	if (manifestSnapshot === undefined) {
 		throw new Error('The remote manifest does not exist');
 	}
+	const caseInsensitiveDestination = await detectCaseInsensitiveDestination(root);
 	const plan = await planPull({
 		agentRoot: root,
+		caseInsensitiveDestination,
 		connectionFingerprint: connectionFingerprint(input.config.connection),
 		manifest: manifestSnapshot.manifest,
 		...(operation === undefined ? {} : { operation }),
