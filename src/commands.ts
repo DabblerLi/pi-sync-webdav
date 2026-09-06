@@ -20,8 +20,8 @@ import {
 import type { OperationOptions, OperationProgress } from './operation.js';
 import {
 	RemoteStore,
+	toRemoteOperationOptions,
 	WriteCapabilityProbeCancelledError,
-	type RemoteOperationOptions,
 } from './remote-store.js';
 import { promptSecret } from './secret-input.js';
 import {
@@ -70,19 +70,6 @@ const OPTIONAL_PATH_CONFIRMATIONS = [
 ] as const;
 
 type SyncWebdavSubcommand = (typeof SUBCOMMANDS)[number] | 'dashboard';
-
-function toRemoteOperationOptions(operation: OperationOptions): RemoteOperationOptions {
-	return {
-		...(operation.onProgress === undefined ? {} : { onProgress: operation.onProgress }),
-		...(operation.signal === undefined ? {} : { signal: operation.signal }),
-		onRetry: (retry) =>
-			operation.onProgress?.({
-				completed: retry.attempt,
-				phase: 'retrying',
-				total: retry.total,
-			}),
-	};
-}
 
 async function runCommandOperation<T>(
 	ctx: ExtensionCommandContext,

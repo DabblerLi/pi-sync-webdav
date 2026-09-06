@@ -41,6 +41,24 @@ export interface RemoteOperationOptions extends OperationOptions {
 	readonly onRetry?: WebDavRequestOptions['onRetry'];
 }
 
+export function toRemoteOperationOptions(
+	operation: OperationOptions | undefined,
+): RemoteOperationOptions | undefined {
+	if (operation === undefined) {
+		return undefined;
+	}
+	return {
+		...(operation.onProgress === undefined ? {} : { onProgress: operation.onProgress }),
+		...(operation.signal === undefined ? {} : { signal: operation.signal }),
+		onRetry: (retry) =>
+			operation.onProgress?.({
+				completed: retry.attempt,
+				phase: 'retrying',
+				total: retry.total,
+			}),
+	};
+}
+
 export interface RemoteResidueCandidate {
 	readonly kind: 'probe' | 'revision';
 	readonly path: SafeRelativePath;

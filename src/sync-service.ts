@@ -26,15 +26,17 @@ import {
 	createGlobalPackageSyncRuntime,
 	planPackageSync,
 	readGlobalPackageSources,
+	type PackageOperation,
 	type PackageOperationResult,
 	type PackageSyncRuntime,
 } from './package-sync.js';
 import {
 	RemoteStore,
+	toRemoteOperationOptions,
 	UnverifiedRemoteManifestError,
 	type PublishRevisionResult,
-	type RemoteOperationOptions,
 } from './remote-store.js';
+import type { SafeRelativePath } from './paths.js';
 import { collectLocalSelection, type LocalSelection } from './selection.js';
 import { planPull, planPush, type PullPlan, type PushPlan } from './sync-plan.js';
 
@@ -51,7 +53,7 @@ export interface PullPreparation {
 	readonly downloadedSettings:
 		{ readonly contents: Buffer; readonly file: ManifestFile } | undefined;
 	readonly manifest: ManifestV1;
-	readonly packageOperations: readonly import('./package-sync.js').PackageOperation[];
+	readonly packageOperations: readonly PackageOperation[];
 	readonly plan: PullPlan;
 	readonly store: RemoteStore;
 }
@@ -81,27 +83,9 @@ function normalizeOperationOptions(
 	return options;
 }
 
-function remoteOperationOptions(
-	operation: OperationOptions | undefined,
-): RemoteOperationOptions | undefined {
-	if (operation === undefined) {
-		return undefined;
-	}
-	return {
-		...(operation.signal === undefined ? {} : { signal: operation.signal }),
-		onProgress: (progress) => operation.onProgress?.(progress),
-		onRetry: (retry) =>
-			operation.onProgress?.({
-				completed: retry.attempt,
-				phase: 'retrying',
-				total: retry.total,
-			}),
-	};
-}
-
 function configWithSyncState(
 	config: PluginConfig,
-	managedPaths: readonly import('./paths.js').SafeRelativePath[],
+	managedPaths: readonly SafeRelativePath[],
 ): PluginConfig {
 	return {
 		connection: config.connection,
@@ -155,7 +139,7 @@ async function packageSourcesAfterPull(input: {
 	const contents = await input.store.readRevisionFile(
 		input.manifest,
 		settingsAction.source,
-		remoteOperationOptions(input.operation),
+		toRemoteOperationOptions(input.operation),
 	);
 	return {
 		after: packageSourcesFromContents(contents),
@@ -179,7 +163,7 @@ export async function preparePush(
 		...(operation === undefined ? {} : { operation }),
 	});
 	try {
-		const remote = await input.store.readManifest(remoteOperationOptions(operation));
+		const remote = await input.store.readManifest(toRemoteOperationOptions(operation));
 		return {
 			config: input.config,
 			plan: planPush({ local: selection, remote }),
@@ -191,7 +175,7 @@ export async function preparePush(
 		if (!(error instanceof UnverifiedRemoteManifestError)) {
 			throw error;
 		}
-		const rawManifest = await input.store.readRawManifest(remoteOperationOptions(operation));
+		const rawManifest = await input.store.readRawManifest(toRemoteOperationOptions(operation));
 		if (rawManifest === undefined) {
 			throw error;
 		}
@@ -220,7 +204,7 @@ export async function publishPreparedPush(
 			expectedManifestSha256: preparation.plan.expectedRemoteManifestSha256,
 			files: preparation.selection.files,
 		},
-		remoteOperationOptions(options.operation),
+		toRemoteOperationOptions(options.operation),
 	);
 	await writeConfig(
 		agentRoot,
@@ -242,7 +226,7 @@ export async function preparePull(
 	operation?: OperationOptions,
 ): Promise<PullPreparation> {
 	const root = resolve(input.agentRoot);
-	const manifestSnapshot = await input.store.readManifest(remoteOperationOptions(operation));
+	const manifestSnapshot = await input.store.readManifest(toRemoteOperationOptions(operation));
 	if (manifestSnapshot === undefined) {
 		throw new Error('The remote manifest does not exist');
 	}
@@ -312,7 +296,7 @@ export async function stagePreparedPull(
 					: await preparation.store.readRevisionFile(
 							preparation.manifest,
 							file,
-							remoteOperationOptions(operation),
+							toRemoteOperationOptions(operation),
 						);
 			await stageVerifiedFile(agentRoot, activeWorkspace, file, contents, operation);
 			completedDownloads += 1;
