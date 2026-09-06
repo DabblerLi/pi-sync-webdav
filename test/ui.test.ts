@@ -262,7 +262,6 @@ describe('selectOption', () => {
 		const text = rendered.join('\n');
 		expect(text).toContain('Pick one');
 		expect(text).toContain('→ First');
-		expect(text).toContain('First');
 		expect(text).toContain('navigate');
 		expect(text).toContain('cancel');
 	});

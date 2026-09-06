@@ -161,7 +161,7 @@ class OptionListBody implements Component {
 		return this.options.map((option, optionIndex) => {
 			const line =
 				optionIndex === this.#index
-					? this.theme.fg('accent', '→ ') + this.theme.fg('accent', option)
+					? this.theme.fg('accent', `→ ${option}`)
 					: `  ${this.theme.fg('text', option)}`;
 			return truncateToWidth(` ${line}`, width);
 		});
