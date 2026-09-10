@@ -70,4 +70,47 @@ describe('promptSecret', () => {
 
 		await expect(promptSecret(ctx, 'WebDAV password')).resolves.toBeUndefined();
 	});
+
+	it('accepts a bracketed paste as literal text', async () => {
+		let rendered = '';
+		const ctx = createContext((component) => {
+			component.handleInput?.('\x1b[200~p@ss!word\x1b[201~');
+			rendered = component.render(60).join('\n');
+			component.handleInput?.('!');
+		});
+
+		await expect(promptSecret(ctx, 'WebDAV password')).resolves.toBe('p@ss!word');
+		expect(rendered).toContain('*********');
+		expect(rendered).not.toContain('200~');
+	});
+
+	it('accepts a bracketed paste split across input chunks', async () => {
+		const ctx = createContext((component) => {
+			component.handleInput?.('\x1b[200~hun');
+			component.handleInput?.('ter');
+			component.handleInput?.('2\x1b[201~');
+			component.handleInput?.('!');
+		});
+
+		await expect(promptSecret(ctx, 'WebDAV password')).resolves.toBe('hunter2');
+	});
+
+	it('drops line breaks without losing the rest of a pasted value', async () => {
+		const ctx = createContext((component) => {
+			component.handleInput?.('\x1b[200~first\r');
+			component.handleInput?.('\nsecond\n\x1b[201~');
+			component.handleInput?.('!');
+		});
+
+		await expect(promptSecret(ctx, 'WebDAV password')).resolves.toBe('firstsecond');
+	});
+
+	it('inserts printable kitty CSI-u input', async () => {
+		const ctx = createContext((component) => {
+			component.handleInput?.('\x1b[97u');
+			component.handleInput?.('!');
+		});
+
+		await expect(promptSecret(ctx, 'WebDAV password')).resolves.toBe('a');
+	});
 });
