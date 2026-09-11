@@ -42,7 +42,7 @@ pi update --extensions
 | Command                 | What it does                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------- |
 | `/sync-webdav`          | Opens setup when unconfigured, otherwise the dashboard.                         |
-| `/sync-webdav settings` | Edits the WebDAV connection or the local push selection.                        |
+| `/sync-webdav settings` | Edits the WebDAV connection, the local push selection, or push exclusions.      |
 | `/sync-webdav status`   | Checks that the remote folder is reachable and readable, and reports sync data. |
 | `/sync-webdav diff`     | Previews the file changes the next push would make. Changes nothing.            |
 | `/sync-webdav push`     | Uploads the selected local configuration.                                       |
@@ -59,6 +59,8 @@ Default push selection: `settings.json`, `keybindings.json`, `AGENTS.md`, `SYSTE
 Change the selection under **settings**. Directories sync recursively. The selection only affects `push`; `pull` always applies the full remote file set.
 
 The top-level `npm/`, `git/`, and `pi-sync-webdav/` directories are never synced. `logs/` and `node_modules/` are ignored wherever they appear.
+
+`.DS_Store`, `Thumbs.db`, and `desktop.ini` are skipped by push. Add more rules under **settings** → Exclusions: a name without `/` matches files and directories at any depth, and an entry with `/` matches one relative path. Rules filter the contents of the top-level entries you check in the push selection; to stop syncing a whole entry, turn it off there.
 
 `sessions/` and `auth.json` are off by default. Adding one to the selection asks for an extra confirmation. Only sync sensitive data to a remote you trust.
 

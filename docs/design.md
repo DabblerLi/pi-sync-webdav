@@ -5,7 +5,7 @@
 `pi-sync-webdav` is a Pi Package for manual configuration sync over one Basic Auth WebDAV connection.
 
 - Commands: `/sync-webdav`, `settings`, `status`, `diff`, `push`, `pull`, `restore`, and `cleanup`.
-- `/sync-webdav` initializes an unconfigured package; otherwise its dashboard offers routine commands. `cleanup` remains available only as an explicit subcommand. `settings` edits either the complete connection or the local push selection. Saving a connection validates read and write access but does not start a push or pull.
+- `/sync-webdav` initializes an unconfigured package; otherwise its dashboard offers routine commands. `cleanup` remains available only as an explicit subcommand. `settings` edits the complete connection, the local push selection, or the push exclusion rules. Saving a connection validates read and write access but does not start a push or pull.
 - Sync is always user initiated. There is no background sync, file watching, multi-target support, ETag/LOCK handling, remote history, or backward compatibility.
 - The plugin supports standard WebDAV operations only: `COPY`, `MKCOL`, `PROPFIND`, `GET`, `PUT`, and `DELETE`.
 
@@ -16,7 +16,7 @@ Private data lives under the effective Pi agent directory in `pi-sync-webdav/` a
 - Configuration and credentials use mode `0600` where supported. A pull repairs `auth.json` to mode `0600` where supported even when its contents are unchanged.
 - `backups/` holds the files replaced or removed by the most recent pull that changed local files; the first backup write of a later pull replaces the previous set.
 - A local temporary workspace stages downloads for verification before local replacement. It is removed when the pull finishes, and stale workspaces from interrupted pulls are removed when the next pull starts.
-- The configuration stores one connection, the push include list, and minimal sync state.
+- The configuration stores one connection, the push include list, the push exclusion rules, and minimal sync state.
 - Sync state contains only a connection fingerprint and managed relative paths. It is used to safely mirror remote deletions only for files previously managed by the same connection.
 - Saving a connection with a changed URL, remote path, or username drops sync state; changing only the password retains it.
 
@@ -40,7 +40,7 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 
 ## Sync behavior
 
-- The local include list affects push only. Pull always applies the remote manifest.
+- The local include list and exclusion rules affect push only. Pull always applies the remote manifest.
 - Each pull detects the destination's case sensitivity with a probe file inside the plugin's private directory.
 - Only files listed in the manifest are materialized; absent or empty directories are not created by pull, and directories left empty by pull deletions are removed.
 - Pushes and pulls with changes present one batch confirmation using file paths and add/update/delete actions. A permission-only `SECURE auth.json` action is also confirmed. The plan list scrolls inside the dialog with j/k and page keys, and warnings stay pinned above the confirm options.
@@ -57,6 +57,8 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 
 - Validate URLs, remote paths, manifest entries, and local targets before I/O. A remote path may have one input trailing slash but is persisted without it; the remote path is required and re-prompted immediately when invalid. Reject unsafe paths: traversal, special files, absolute/Windows paths, device names, alternate data streams, trailing dots/spaces, symlinks, and case-insensitive collisions among push selections, manifest entries, and sync-state paths.
 - Top-level `npm/`, `git/`, and the plugin private directory are never synced. `logs/` and `node_modules/` are excluded at every depth.
+- Push always skips built-in OS metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`); the private configuration adds further exclusion rules. A rule without `/` matches a path component at any depth, whether it names a file or a directory; a rule with `/` matches one relative path; matching is case-insensitive. Rules filter entries inside a push selection, and a rule that names a selected top-level entry is rejected when configuration is validated.
+- Exclusion rules do not restrict manifest paths: pull applies remote manifests that contain those names.
 - `sessions/` and `auth.json` are opt-in. The extra confirmation appears when such a path is added to the push selection and is remembered while it remains selected; removing it and adding it again requires confirmation again. `auth.json` is restored with mode `0600`.
 - Selected text files receive local secret-pattern warnings. Secrets, credentials, file contents, and Authorization headers are never rendered or logged.
 - HTTPS is required by default; HTTP requires explicit confirmation. Invalid or self-signed TLS certificates are rejected. A connection must prove read access before it can be saved; a failed write probe produces an explicitly read-only connection.

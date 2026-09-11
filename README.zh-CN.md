@@ -39,16 +39,16 @@ pi update --extensions
 
 ## 命令
 
-| 命令                    | 作用                                               |
-| ----------------------- | -------------------------------------------------- |
-| `/sync-webdav`          | 未配置时进入初始化；已配置时打开仪表盘。           |
-| `/sync-webdav settings` | 修改 WebDAV 连接或本地 push 选择范围。             |
-| `/sync-webdav status`   | 检查远端文件夹是否可达、可读，并报告同步数据情况。 |
-| `/sync-webdav diff`     | 预览下次 push 会产生的文件变更，不修改任何内容。   |
-| `/sync-webdav push`     | 上传选定的本地配置。                               |
-| `/sync-webdav pull`     | 确认后下载并应用远端配置。                         |
-| `/sync-webdav restore`  | 恢复先前 pull 产生的最新本地备份。                 |
-| `/sync-webdav cleanup`  | 清理失败或中断的操作留下的、经过验证的远端残留。   |
+| 命令                    | 作用                                                   |
+| ----------------------- | ------------------------------------------------------ |
+| `/sync-webdav`          | 未配置时进入初始化；已配置时打开仪表盘。               |
+| `/sync-webdav settings` | 修改 WebDAV 连接、本地 push 选择范围或 push 排除规则。 |
+| `/sync-webdav status`   | 检查远端文件夹是否可达、可读，并报告同步数据情况。     |
+| `/sync-webdav diff`     | 预览下次 push 会产生的文件变更，不修改任何内容。       |
+| `/sync-webdav push`     | 上传选定的本地配置。                                   |
+| `/sync-webdav pull`     | 确认后下载并应用远端配置。                             |
+| `/sync-webdav restore`  | 恢复先前 pull 产生的最新本地备份。                     |
+| `/sync-webdav cleanup`  | 清理失败或中断的操作留下的、经过验证的远端残留。       |
 
 `status` 和 `diff` 是只读的，可在非交互模式运行。其他命令需要交互式 Pi TUI。
 
@@ -59,6 +59,8 @@ pi update --extensions
 可在 **settings** 中修改选择范围，目录递归同步。选择范围只影响 `push`；`pull` 始终应用完整的远端文件集。
 
 顶层的 `npm/`、`git/` 和 `pi-sync-webdav/` 不会同步；无论出现在什么层级，`logs/` 和 `node_modules/` 都会被忽略。
+
+`.DS_Store`、`Thumbs.db`、`desktop.ini` 不会随 push 上传。可在 **settings** → Exclusions 添加更多规则：不含 `/` 的名称匹配任意层级的同名文件和目录，含 `/` 的条目匹配一个相对路径。规则只筛选 Push selection 中勾选的顶层条目的内容；要让某个顶层条目整体不同步，请在那里取消勾选。
 
 `sessions/` 和 `auth.json` 默认不选中。将它们加入选择范围时需要额外确认。注意将敏感数据只同步到你信任的远端。
 
