@@ -1,6 +1,6 @@
 {
 	"name": "pi-sync-webdav",
-	"version": "0.3.2",
+	"version": "0.4.0",
 	"description": "Manual WebDAV sync for Pi Coding Agent configuration.",
 	"license": "MIT",
 	"type": "module",
