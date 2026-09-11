@@ -1,6 +1,7 @@
 export type OperationPhase =
 	| 'applying'
 	| 'cleaning'
+	| 'copying'
 	| 'downloading'
 	| 'preparing'
 	| 'restoring'

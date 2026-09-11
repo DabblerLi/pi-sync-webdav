@@ -191,6 +191,44 @@ describe('remote store', () => {
 		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
 	});
 
+	it('reports server-side copy progress for reused top-level entries', async () => {
+		const { server, store } = await createStore();
+		await store.ensureRoot();
+		const files = [
+			{ contents: Buffer.from('agents', 'utf8'), path: parseManifestPath('AGENTS.md') },
+			{ contents: Buffer.from('dark', 'utf8'), path: parseManifestPath('themes/dark.txt') },
+			{ contents: Buffer.from('light', 'utf8'), path: parseManifestPath('themes/light.txt') },
+		];
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files,
+		});
+		const snapshot = await store.readManifest();
+		if (snapshot === undefined) {
+			throw new Error('Expected a manifest after publishing');
+		}
+		const copyProgress: Array<readonly [number | undefined, number | undefined]> = [];
+
+		await store.publishRevision(
+			{ allowUnverifiedManifest: false, expectedManifestSha256: snapshot.sha256, files },
+			{
+				onProgress: (progress) => {
+					if (progress.phase === 'copying') {
+						copyProgress.push([progress.completed, progress.total]);
+					}
+				},
+			},
+		);
+
+		expect(server.requests.filter((request) => request.method === 'COPY')).toHaveLength(2);
+		expect(copyProgress).toEqual([
+			[0, 2],
+			[1, 2],
+			[2, 2],
+		]);
+	});
+
 	it('uploads an entry in full when its top-level COPY is unsupported', async () => {
 		const { gateway, root, server, store } = await createStore();
 		const first = await store.publishRevision({

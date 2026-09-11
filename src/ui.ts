@@ -39,6 +39,8 @@ export function formatOperationProgress(progress: OperationProgress): string {
 			return `Applying configuration${count}…`;
 		case 'cleaning':
 			return 'Cleaning remote residue…';
+		case 'copying':
+			return `Copying remote configuration${count}…`;
 		case 'downloading':
 			return `Downloading configuration${count}…`;
 		case 'preparing':

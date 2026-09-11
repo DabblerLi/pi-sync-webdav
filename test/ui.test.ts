@@ -81,6 +81,9 @@ describe('sync plan rendering', () => {
 	});
 
 	it('renders progress without sizes, paths, or credentials', () => {
+		expect(formatOperationProgress({ completed: 2, phase: 'copying', total: 5 })).toBe(
+			'Copying remote configuration (2/5)…',
+		);
 		expect(formatOperationProgress({ completed: 2, phase: 'uploading', total: 5 })).toBe(
 			'Uploading configuration (2/5)…',
 		);

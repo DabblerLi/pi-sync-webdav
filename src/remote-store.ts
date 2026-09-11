@@ -553,6 +553,13 @@ export class RemoteStore {
 					? filesToUpload
 					: withFallbackEntryFiles(preparedFiles, filesToUpload, copyFallbackEntries);
 			let completedUploads = 0;
+			if (uploadFiles.length > 0) {
+				reportProgress(options, {
+					completed: 0,
+					phase: 'uploading',
+					total: uploadFiles.length,
+				});
+			}
 			await mapConcurrent(uploadFiles, FILE_OPERATION_CONCURRENCY, async (file) => {
 				throwIfCancelled(options);
 				const remoteFile = remoteChild(revisionPath, file.path);
@@ -820,17 +827,25 @@ export class RemoteStore {
 		const previousRevisionPath = this.#revisionPath(previousManifest.revision);
 		const fallbackEntries = new Set<SafeRelativePath>();
 		let copyUnsupported = false;
+		if (plan.copyPaths.length > 0) {
+			reportProgress(options, {
+				completed: 0,
+				phase: 'copying',
+				total: plan.copyPaths.length,
+			});
+		}
+		let completedCopies = 0;
 		await mapConcurrent(plan.copyPaths, FILE_OPERATION_CONCURRENCY, async (path) => {
-			if (copyUnsupported) {
-				fallbackEntries.add(path);
-				return;
-			}
 			try {
-				await this.#gateway.copyPath(
-					remoteChild(previousRevisionPath, path),
-					remoteChild(revisionPath, path),
-					requestOptions(options),
-				);
+				if (copyUnsupported) {
+					fallbackEntries.add(path);
+				} else {
+					await this.#gateway.copyPath(
+						remoteChild(previousRevisionPath, path),
+						remoteChild(revisionPath, path),
+						requestOptions(options),
+					);
+				}
 			} catch (error: unknown) {
 				const status = copyFallbackStatus(error);
 				if (status === undefined) {
@@ -839,6 +854,12 @@ export class RemoteStore {
 				fallbackEntries.add(path);
 				copyUnsupported = isCopyUnsupportedStatus(status);
 			}
+			completedCopies += 1;
+			reportProgress(options, {
+				completed: completedCopies,
+				phase: 'copying',
+				total: plan.copyPaths.length,
+			});
 		});
 		// Fallback entries are removed and rebuilt wholesale, so stale-file
 		// deletions and standalone directory creation skip them.
