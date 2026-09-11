@@ -583,6 +583,7 @@ export class RemoteStore {
 				});
 			});
 
+			reportProgress(options, { phase: 'publishing' });
 			const beforeCommit = await this.readRawManifest(options);
 			if (beforeCommit?.sha256 !== currentManifest?.sha256) {
 				throw new RemoteManifestChangedError();

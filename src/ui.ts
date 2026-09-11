@@ -45,6 +45,8 @@ export function formatOperationProgress(progress: OperationProgress): string {
 			return `Downloading configuration${count}…`;
 		case 'preparing':
 			return 'Preparing configuration…';
+		case 'publishing':
+			return 'Publishing configuration…';
 		case 'restoring':
 			return `Restoring local backups${count}…`;
 		case 'retrying':

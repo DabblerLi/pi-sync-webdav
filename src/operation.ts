@@ -4,6 +4,7 @@ export type OperationPhase =
 	| 'copying'
 	| 'downloading'
 	| 'preparing'
+	| 'publishing'
 	| 'restoring'
 	| 'retrying'
 	| 'uploading'

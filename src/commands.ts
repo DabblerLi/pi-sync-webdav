@@ -547,7 +547,7 @@ async function runPush(ctx: ExtensionCommandContext, agentRoot: string): Promise
 	) {
 		return;
 	}
-	const published = await runCommandOperation(ctx, { phase: 'uploading' }, (operation) =>
+	const published = await runCommandOperation(ctx, { phase: 'preparing' }, (operation) =>
 		publishPreparedPush(agentRoot, preparation, {
 			allowUnverifiedManifest: preparation.requiresUnverifiedManifestConfirmation,
 			operation,

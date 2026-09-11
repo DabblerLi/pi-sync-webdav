@@ -191,7 +191,7 @@ describe('remote store', () => {
 		expect((await store.readManifest())?.manifest).toEqual(second.manifest);
 	});
 
-	it('reports server-side copy progress for reused top-level entries', async () => {
+	it('reports copy progress before the commit phase for reused top-level entries', async () => {
 		const { server, store } = await createStore();
 		await store.ensureRoot();
 		const files = [
@@ -209,11 +209,13 @@ describe('remote store', () => {
 			throw new Error('Expected a manifest after publishing');
 		}
 		const copyProgress: Array<readonly [number | undefined, number | undefined]> = [];
+		const phases: string[] = [];
 
 		await store.publishRevision(
 			{ allowUnverifiedManifest: false, expectedManifestSha256: snapshot.sha256, files },
 			{
 				onProgress: (progress) => {
+					phases.push(progress.phase);
 					if (progress.phase === 'copying') {
 						copyProgress.push([progress.completed, progress.total]);
 					}
@@ -227,6 +229,7 @@ describe('remote store', () => {
 			[1, 2],
 			[2, 2],
 		]);
+		expect(phases).toEqual(['copying', 'copying', 'copying', 'publishing', 'cleaning']);
 	});
 
 	it('uploads an entry in full when its top-level COPY is unsupported', async () => {
