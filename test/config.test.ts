@@ -66,23 +66,11 @@ describe('private configuration', () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
 		temporaryDirectories.push(root);
 		const config = createConfig();
-		const legacy = {
-			connection: {
-				password: config.connection.password,
-				readOnly: config.connection.readOnly,
-				remotePath: config.connection.remotePath,
-				url: config.connection.url,
-				username: config.connection.username,
-			},
-			pushInclude: config.pushInclude,
-			syncState: config.syncState,
-			version: config.version,
-		};
-		const paths = getPrivatePaths(root);
-		await mkdir(paths.directory, { recursive: true });
-		await chmod(paths.directory, 0o700);
-		await writeFile(paths.configFile, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8');
-		await chmod(paths.configFile, 0o600);
+		await writeConfig(root, config);
+		const configFile = getPrivatePaths(root).configFile;
+		const stored = JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>;
+		delete stored.pushExclude;
+		await writeFile(configFile, `${JSON.stringify(stored, null, 2)}\n`, 'utf8');
 
 		await expect(readConfig(root)).resolves.toEqual({ ...config, pushExclude: [] });
 	});

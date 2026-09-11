@@ -7,7 +7,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockWebDavServer } from './mock-webdav-server.js';
 
 import { parseSyncWebdavCommand, registerSyncWebdavCommands } from '../src/commands.js';
-import { connectionFingerprint, readConfig, writeConfig } from '../src/config.js';
+import {
+	connectionFingerprint,
+	readConfig,
+	writeConfig,
+	type PluginConfig,
+} from '../src/config.js';
 import { generateRevisionId } from '../src/manifest.js';
 import {
 	parseRemotePath,
@@ -115,6 +120,29 @@ function createCustomDriver(steps: readonly CustomStep[]) {
 		});
 	});
 	return { calls: () => position, custom };
+}
+
+async function createStoredConfigRoot(input: {
+	readonly pushExclude: PluginConfig['pushExclude'];
+	readonly pushInclude: PluginConfig['pushInclude'];
+}): Promise<string> {
+	const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+	temporaryDirectories.push(root);
+	const server = await MockWebDavServer.create();
+	servers.push(server);
+	const connection = normalizeConnection({
+		password: 'password',
+		remotePath: 'pi-sync-webdav',
+		url: server.baseUrl,
+		username: 'alice',
+	});
+	await writeConfig(root, {
+		connection: { ...connection, readOnly: false },
+		pushExclude: input.pushExclude,
+		pushInclude: input.pushInclude,
+		version: 1,
+	});
+	return root;
 }
 
 afterEach(async () => {
@@ -309,21 +337,9 @@ describe('sync command registration', () => {
 	});
 
 	it('adds and saves exclusion rules through settings', async () => {
-		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
-		temporaryDirectories.push(root);
-		const server = await MockWebDavServer.create();
-		servers.push(server);
-		const connection = normalizeConnection({
-			password: 'password',
-			remotePath: 'pi-sync-webdav',
-			url: server.baseUrl,
-			username: 'alice',
-		});
-		await writeConfig(root, {
-			connection: { ...connection, readOnly: false },
+		const root = await createStoredConfigRoot({
 			pushExclude: [],
 			pushInclude: [parsePushInclude('themes')],
-			version: 1,
 		});
 		const { command: registered } = registerTestCommand(root);
 		const input = vi.fn().mockResolvedValueOnce('cache');
@@ -348,21 +364,9 @@ describe('sync command registration', () => {
 	});
 
 	it('rejects invalid and conflicting exclusion rules without saving them', async () => {
-		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
-		temporaryDirectories.push(root);
-		const server = await MockWebDavServer.create();
-		servers.push(server);
-		const connection = normalizeConnection({
-			password: 'password',
-			remotePath: 'pi-sync-webdav',
-			url: server.baseUrl,
-			username: 'alice',
-		});
-		await writeConfig(root, {
-			connection: { ...connection, readOnly: false },
+		const root = await createStoredConfigRoot({
 			pushExclude: [],
 			pushInclude: [parsePushInclude('themes')],
-			version: 1,
 		});
 		const { command: registered } = registerTestCommand(root);
 		const input = vi
@@ -394,21 +398,9 @@ describe('sync command registration', () => {
 	});
 
 	it('keeps the saved push selection when it collides with an exclusion rule', async () => {
-		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
-		temporaryDirectories.push(root);
-		const server = await MockWebDavServer.create();
-		servers.push(server);
-		const connection = normalizeConnection({
-			password: 'password',
-			remotePath: 'pi-sync-webdav',
-			url: server.baseUrl,
-			username: 'alice',
-		});
-		await writeConfig(root, {
-			connection: { ...connection, readOnly: false },
+		const root = await createStoredConfigRoot({
 			pushExclude: [parsePushExclude('skills')],
 			pushInclude: [parsePushInclude('settings.json')],
-			version: 1,
 		});
 		const { command: registered } = registerTestCommand(root);
 		const notify = vi.fn();
