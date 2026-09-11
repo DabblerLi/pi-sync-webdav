@@ -4,9 +4,11 @@ import { join, resolve } from 'node:path';
 
 import {
 	assertNoPathCollisions,
+	assertNoPushExcludeConflicts,
 	getPrivatePaths,
 	normalizeConnection,
 	parseManifestPath,
+	parsePushExclude,
 	parsePushInclude,
 	type NormalizedConnection,
 	type SafeRelativePath,
@@ -27,6 +29,7 @@ export interface StoredConnection extends NormalizedConnection {
 
 export interface PluginConfig {
 	readonly connection: StoredConnection;
+	readonly pushExclude: readonly SafeRelativePath[];
 	readonly pushInclude: readonly SafeRelativePath[];
 	readonly syncState?: SyncState;
 	readonly version: typeof CONFIG_VERSION;
@@ -139,6 +142,9 @@ function validatePluginConfig(value: unknown, allowDerivedConnectionFields = fal
 		invalidConfig();
 	}
 	const expectedKeys = ['version', 'connection', 'pushInclude'];
+	if (Object.hasOwn(value, 'pushExclude')) {
+		expectedKeys.push('pushExclude');
+	}
 	if (Object.hasOwn(value, 'syncState')) {
 		expectedKeys.push('syncState');
 	}
@@ -148,9 +154,15 @@ function validatePluginConfig(value: unknown, allowDerivedConnectionFields = fal
 	}
 
 	const syncState = Object.hasOwn(value, 'syncState') ? parseSyncState(value.syncState) : undefined;
+	const pushExclude = Object.hasOwn(value, 'pushExclude')
+		? parseUniquePaths(value.pushExclude, parsePushExclude)
+		: [];
+	const pushInclude = parseUniquePaths(value.pushInclude, parsePushInclude);
+	assertNoPushExcludeConflicts(pushInclude, pushExclude, 'Invalid plugin configuration');
 	return {
 		connection: parseConnection(value.connection, allowDerivedConnectionFields),
-		pushInclude: parseUniquePaths(value.pushInclude, parsePushInclude),
+		pushExclude,
+		pushInclude,
 		...(syncState === undefined ? {} : { syncState }),
 		version: CONFIG_VERSION,
 	};
@@ -166,6 +178,7 @@ function serializeConfig(config: PluginConfig): string {
 			url: validated.connection.url,
 			username: validated.connection.username,
 		},
+		pushExclude: validated.pushExclude,
 		pushInclude: validated.pushInclude,
 		...(validated.syncState === undefined ? {} : { syncState: validated.syncState }),
 		version: validated.version,

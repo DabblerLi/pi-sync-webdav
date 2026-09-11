@@ -302,12 +302,46 @@ export function parsePushInclude(value: unknown): SafeRelativePath {
 	return path as SafeRelativePath;
 }
 
+export function parsePushExclude(value: unknown): SafeRelativePath {
+	const path = parseLogicalRelativePath(value, 'Invalid push exclude');
+	assertWindowsSafeLocalPath(path, 'Invalid push exclude');
+	return path as SafeRelativePath;
+}
+
 export function isPermanentlyExcluded(path: string): boolean {
 	const components = path.split('/').map((component) => component.toLocaleLowerCase('en-US'));
 	return (
 		PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES.has(components[0] ?? '') ||
 		components.some((component) => RECURSIVELY_EXCLUDED_NAMES.has(component))
 	);
+}
+
+/** Rules without '/' match a path component at any depth; rules with '/' match one relative path. */
+export function isPushExcluded(path: string, pushExclude: readonly SafeRelativePath[]): boolean {
+	if (pushExclude.length === 0) {
+		return false;
+	}
+	const components = path.split('/').map((component) => component.toLocaleLowerCase('en-US'));
+	const normalizedPath = components.join('/');
+	return pushExclude.some((rule) => {
+		const normalizedRule = rule.toLocaleLowerCase('en-US');
+		return normalizedRule.includes('/')
+			? normalizedPath === normalizedRule
+			: components.includes(normalizedRule);
+	});
+}
+
+export function assertNoPushExcludeConflicts(
+	pushInclude: readonly SafeRelativePath[],
+	pushExclude: readonly SafeRelativePath[],
+	errorMessage: string,
+): void {
+	const selectedNames = new Set(pushInclude.map((path) => path.toLocaleLowerCase('en-US')));
+	for (const rule of pushExclude) {
+		if (!rule.includes('/') && selectedNames.has(rule.toLocaleLowerCase('en-US'))) {
+			throw new Error(`${errorMessage}: '${rule}'`);
+		}
+	}
 }
 
 export function encodeRemotePath(path: RemotePath | SafeRelativePath): string {

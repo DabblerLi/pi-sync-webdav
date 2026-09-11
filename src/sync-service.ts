@@ -89,6 +89,7 @@ function configWithSyncState(
 ): PluginConfig {
 	return {
 		connection: config.connection,
+		pushExclude: config.pushExclude,
 		pushInclude: config.pushInclude,
 		syncState: {
 			connectionFingerprint: connectionFingerprint(config.connection),
@@ -160,6 +161,7 @@ export async function preparePush(
 		agentRoot: root,
 		enforceAuthPermissions: true,
 		includes: input.config.pushInclude,
+		pushExclude: input.config.pushExclude,
 		...(operation === undefined ? {} : { operation }),
 	});
 	try {

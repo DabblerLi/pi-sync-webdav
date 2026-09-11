@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { MAX_FILE_BYTES } from '../src/manifest.js';
-import { parsePushInclude } from '../src/paths.js';
+import { parsePushExclude, parsePushInclude } from '../src/paths.js';
 import {
 	collectLocalSelection,
 	DEFAULT_PUSH_INCLUDES,
@@ -129,6 +129,32 @@ describe('local selection collection', () => {
 		expect(selection.totalBytes).toBe(
 			selection.files.reduce((total, file) => total + file.contents.byteLength, 0),
 		);
+	});
+
+	it('skips built-in and configured exclusions inside selected directories', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-selection-');
+		temporaryDirectories.push(root);
+		await mkdir(join(root, 'themes', 'nested', 'tmp'), { recursive: true });
+		await mkdir(join(root, 'themes', 'cache'), { recursive: true });
+		await writeFile(join(root, 'themes', 'dark.json'), '{}', 'utf8');
+		await writeFile(join(root, 'themes', '.DS_Store'), 'junk', 'utf8');
+		await writeFile(join(root, 'themes', 'nested', 'Thumbs.db'), 'junk', 'utf8');
+		await writeFile(join(root, 'themes', 'nested', 'dark.json'), '{}', 'utf8');
+		await writeFile(join(root, 'themes', 'nested', 'tmp', 'file.json'), '{}', 'utf8');
+		await writeFile(join(root, 'themes', 'cache', 'entry.json'), '{}', 'utf8');
+		await writeFile(join(root, 'themes', 'cache.txt'), '{}', 'utf8');
+
+		const selection = await collectLocalSelection({
+			agentRoot: root,
+			includes: [parsePushInclude('themes')],
+			pushExclude: [parsePushExclude('cache'), parsePushExclude('themes/nested/tmp')],
+		});
+
+		expect(selection.files.map((file) => file.path)).toEqual([
+			'themes/cache.txt',
+			'themes/dark.json',
+			'themes/nested/dark.json',
+		]);
 	});
 
 	it('stops selection before scanning when cancelled', async () => {

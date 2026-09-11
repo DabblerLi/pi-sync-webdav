@@ -12,7 +12,9 @@ import {
 } from './operation.js';
 import {
 	isPermanentlyExcluded,
+	isPushExcluded,
 	parseManifestPath,
+	parsePushExclude,
 	parsePushInclude,
 	type SafeRelativePath,
 } from './paths.js';
@@ -30,6 +32,10 @@ export const DEFAULT_PUSH_INCLUDES = [
 	'skills',
 	'extensions',
 ].map(parsePushInclude) as readonly SafeRelativePath[];
+
+export const DEFAULT_PUSH_EXCLUDES = ['.DS_Store', 'Thumbs.db', 'desktop.ini'].map(
+	parsePushExclude,
+) as readonly SafeRelativePath[];
 
 const SECRET_PATTERNS = [
 	/-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----/u,
@@ -210,6 +216,7 @@ export async function collectLocalSelection(input: {
 	readonly enforceAuthPermissions?: boolean;
 	readonly includes: readonly SafeRelativePath[];
 	readonly operation?: OperationOptions;
+	readonly pushExclude?: readonly SafeRelativePath[];
 }): Promise<LocalSelection> {
 	const root = assertSafeAgentRoot(input.agentRoot);
 	throwIfOperationCancelled(input.operation?.signal);
@@ -220,6 +227,10 @@ export async function collectLocalSelection(input: {
 	if (new Set(includes).size !== includes.length) {
 		throw new Error('Duplicate push include');
 	}
+	const pushExclude = [
+		...DEFAULT_PUSH_EXCLUDES,
+		...(input.pushExclude ?? []).map(parsePushExclude),
+	];
 
 	const filesToRead: Array<{
 		readonly absolutePath: string;
@@ -290,7 +301,7 @@ export async function collectLocalSelection(input: {
 		for (const name of entries.sort()) {
 			throwIfOperationCancelled(input.operation?.signal);
 			const rawChildPath = `${relativePath}/${name}`;
-			if (isPermanentlyExcluded(rawChildPath)) {
+			if (isPermanentlyExcluded(rawChildPath) || isPushExcluded(rawChildPath, pushExclude)) {
 				continue;
 			}
 			const childPath = parseManifestPath(rawChildPath);

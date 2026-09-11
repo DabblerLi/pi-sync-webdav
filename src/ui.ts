@@ -563,3 +563,104 @@ export async function selectPushIncludes(
 		};
 	});
 }
+
+export type PushExcludeAction =
+	| { readonly action: 'add' }
+	| { readonly action: 'delete'; readonly index: number }
+	| { readonly action: 'save' };
+
+export async function selectPushExcludeAction(
+	ctx: ExtensionCommandContext,
+	builtInRules: readonly SafeRelativePath[],
+	customRules: readonly SafeRelativePath[],
+): Promise<PushExcludeAction | undefined> {
+	if (ctx.mode !== 'tui') {
+		return undefined;
+	}
+	return ctx.ui.custom<PushExcludeAction | undefined>((tui, theme, keybindings, done) => {
+		let index = 0;
+		const render = (width: number): string[] => {
+			const lines: string[] = [
+				truncateToWidth(` ${theme.fg('dim', 'Built-in (always excluded)')}`, width),
+			];
+			for (const rule of builtInRules) {
+				lines.push(truncateToWidth(`   ${theme.fg('dim', rule)}`, width));
+			}
+			lines.push('');
+			lines.push(truncateToWidth(` ${theme.fg('dim', 'Custom rules')}`, width));
+			if (customRules.length === 0) {
+				lines.push(truncateToWidth(`   ${theme.fg('dim', '(none)')}`, width));
+				return lines;
+			}
+			const visibleCount = Math.min(VISIBLE_CANDIDATES, customRules.length);
+			const first = Math.max(
+				0,
+				Math.min(index - Math.floor(visibleCount / 2), customRules.length - visibleCount),
+			);
+			for (const [offset, rule] of customRules.slice(first, first + visibleCount).entries()) {
+				const ruleIndex = first + offset;
+				const focused = ruleIndex === index;
+				const cursor = focused ? '→ ' : '  ';
+				lines.push(
+					truncateToWidth(` ${theme.fg(focused ? 'accent' : 'text', `${cursor}${rule}`)}`, width),
+				);
+			}
+			if (customRules.length > visibleCount) {
+				lines.push(
+					truncateToWidth(
+						` ${theme.fg('dim', `${first + 1}-${first + visibleCount} of ${customRules.length}`)}`,
+						width,
+					),
+				);
+			}
+			return lines;
+		};
+		const handleInput = (data: string): void => {
+			if (keybindings.matches(data, 'tui.select.cancel')) {
+				done(undefined);
+				return;
+			}
+			if (data === 'a') {
+				done({ action: 'add' });
+				return;
+			}
+			if (data === 'd' && customRules.length > 0) {
+				done({ action: 'delete', index });
+				return;
+			}
+			if (keybindings.matches(data, 'tui.select.up') || data === 'k') {
+				if (customRules.length > 0) {
+					index = moveCyclic(index, -1, customRules.length);
+				}
+			} else if (keybindings.matches(data, 'tui.select.down') || data === 'j') {
+				if (customRules.length > 0) {
+					index = moveCyclic(index, 1, customRules.length);
+				}
+			} else if (keybindings.matches(data, 'tui.select.confirm') || data === '\n') {
+				done({ action: 'save' });
+				return;
+			} else {
+				return;
+			}
+			tui.requestRender();
+		};
+
+		const container = createDialogContainer({
+			body: { invalidate: () => undefined, render },
+			hints: formatKeyHints(theme, [
+				['↑↓', 'navigate'],
+				['a', 'add'],
+				['d', 'delete'],
+				[bindingKeys(keybindings, 'tui.select.confirm'), 'save'],
+				[bindingKeys(keybindings, 'tui.select.cancel'), 'cancel'],
+			]),
+			theme,
+			title: 'Push exclusions',
+		});
+		return {
+			handleInput,
+			invalidate: () => container.invalidate(),
+			render: (width: number) => container.render(width),
+		};
+	});
+}

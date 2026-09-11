@@ -5,11 +5,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
 	assertNoPathCollisions,
+	assertNoPushExcludeConflicts,
 	assertSafeLocalTarget,
 	encodeRemotePath,
 	findPathCollisions,
+	isPushExcluded,
 	normalizeConnection,
 	parseManifestPath,
+	parsePushExclude,
 	parsePushInclude,
 	parseRemotePath,
 	resolveLocalTarget,
@@ -128,10 +131,61 @@ describe('normalizeConnection', () => {
 	});
 });
 
+describe('push exclusions', () => {
+	it('accepts names and relative paths but rejects unsafe rules', () => {
+		expect(parsePushExclude('.DS_Store')).toBe('.DS_Store');
+		expect(parsePushExclude('logs')).toBe('logs');
+		expect(parsePushExclude('themes/cache')).toBe('themes/cache');
+
+		for (const rule of [
+			'',
+			'/cache',
+			'C:/cache',
+			'themes//cache',
+			'themes/cache/',
+			'../cache',
+			'themes/cache:stream',
+			'themes/cache?.json',
+			'themes/CON',
+			'themes/trailing ',
+		]) {
+			expect(() => parsePushExclude(rule)).toThrow('Invalid push exclude');
+		}
+	});
+
+	it('matches a component at any depth or one exact relative path', () => {
+		const rules = [parsePushExclude('.DS_Store'), parsePushExclude('themes/cache')];
+
+		expect(isPushExcluded('.DS_Store', rules)).toBe(true);
+		expect(isPushExcluded('skills/a/.ds_store', rules)).toBe(true);
+		expect(isPushExcluded('themes/cache', rules)).toBe(true);
+		expect(isPushExcluded('themes/cache/nested.json', rules)).toBe(false);
+		expect(isPushExcluded('themes/cache-other', rules)).toBe(false);
+		expect(isPushExcluded('other/cache', rules)).toBe(false);
+		expect(isPushExcluded('.DS_Store', [])).toBe(false);
+	});
+
+	it('rejects rules that name a selected top-level entry', () => {
+		const pushInclude = [parsePushInclude('themes'), parsePushInclude('settings.json')];
+		const message = 'Invalid plugin configuration';
+
+		expect(() =>
+			assertNoPushExcludeConflicts(pushInclude, [parsePushExclude('Themes')], message),
+		).toThrow("Invalid plugin configuration: 'Themes'");
+		expect(() =>
+			assertNoPushExcludeConflicts(pushInclude, [parsePushExclude('themes/cache')], message),
+		).not.toThrow();
+		expect(() =>
+			assertNoPushExcludeConflicts(pushInclude, [parsePushExclude('skills')], message),
+		).not.toThrow();
+	});
+});
+
 describe('safe relative paths', () => {
 	it('accepts normal manifest paths but rejects unsafe and excluded paths', () => {
 		expect(parseManifestPath('themes/dark.json')).toBe('themes/dark.json');
 		expect(parseManifestPath('themes/.git/config')).toBe('themes/.git/config');
+		expect(parseManifestPath('themes/.DS_Store')).toBe('themes/.DS_Store');
 		expect(parseManifestPath('auth.json')).toBe('auth.json');
 
 		for (const path of [

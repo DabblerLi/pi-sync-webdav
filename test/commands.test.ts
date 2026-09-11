@@ -13,6 +13,7 @@ import {
 	parseRemotePath,
 	normalizeConnection,
 	parseManifestPath,
+	parsePushExclude,
 	parsePushInclude,
 } from '../src/paths.js';
 import { RemoteStore } from '../src/remote-store.js';
@@ -279,6 +280,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
@@ -306,6 +308,131 @@ describe('sync command registration', () => {
 		expect(notify).toHaveBeenCalledWith('Push selection saved.', 'info');
 	});
 
+	it('adds and saves exclusion rules through settings', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'pi-sync-webdav',
+			url: server.baseUrl,
+			username: 'alice',
+		});
+		await writeConfig(root, {
+			connection: { ...connection, readOnly: false },
+			pushExclude: [],
+			pushInclude: [parsePushInclude('themes')],
+			version: 1,
+		});
+		const { command: registered } = registerTestCommand(root);
+		const input = vi.fn().mockResolvedValueOnce('cache');
+		const notify = vi.fn();
+		const driver = createCustomDriver([
+			valueStep('Exclusions'),
+			valueStep({ action: 'add' }),
+			valueStep({ action: 'save' }),
+			valueStep('Cancel'),
+		]);
+
+		await registered.handler('settings', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(input).toHaveBeenCalledTimes(1);
+		expect(await readConfig(root)).toMatchObject({
+			pushExclude: [parsePushExclude('cache')],
+		});
+		expect(notify).toHaveBeenCalledWith('Push exclusions saved.', 'info');
+	});
+
+	it('rejects invalid and conflicting exclusion rules without saving them', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'pi-sync-webdav',
+			url: server.baseUrl,
+			username: 'alice',
+		});
+		await writeConfig(root, {
+			connection: { ...connection, readOnly: false },
+			pushExclude: [],
+			pushInclude: [parsePushInclude('themes')],
+			version: 1,
+		});
+		const { command: registered } = registerTestCommand(root);
+		const input = vi
+			.fn()
+			.mockResolvedValueOnce('themes/../escape')
+			.mockResolvedValueOnce('themes')
+			.mockResolvedValueOnce('cache');
+		const notify = vi.fn();
+		const driver = createCustomDriver([
+			valueStep('Exclusions'),
+			valueStep({ action: 'add' }),
+			valueStep({ action: 'save' }),
+			valueStep('Cancel'),
+		]);
+
+		await registered.handler('settings', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(notify).toHaveBeenCalledWith('Invalid push exclude', 'error');
+		expect(notify).toHaveBeenCalledWith(
+			"Exclusion rule conflicts with the push selection: 'themes'",
+			'error',
+		);
+		expect(await readConfig(root)).toMatchObject({
+			pushExclude: [parsePushExclude('cache')],
+		});
+	});
+
+	it('keeps the saved push selection when it collides with an exclusion rule', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const connection = normalizeConnection({
+			password: 'password',
+			remotePath: 'pi-sync-webdav',
+			url: server.baseUrl,
+			username: 'alice',
+		});
+		await writeConfig(root, {
+			connection: { ...connection, readOnly: false },
+			pushExclude: [parsePushExclude('skills')],
+			pushInclude: [parsePushInclude('settings.json')],
+			version: 1,
+		});
+		const { command: registered } = registerTestCommand(root);
+		const notify = vi.fn();
+		const driver = createCustomDriver([
+			valueStep('Push selection'),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('settings.json'), parsePushInclude('skills')]),
+			valueStep('Cancel'),
+		]);
+
+		await registered.handler('settings', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input: vi.fn(), notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(notify).toHaveBeenCalledWith(
+			"Push selection conflicts with the exclusion rule: 'skills'",
+			'error',
+		);
+		expect(await readConfig(root)).toMatchObject({
+			pushInclude: [parsePushInclude('settings.json')],
+		});
+	});
+
 	it('validates and saves a complete connection without publishing configuration', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
 		temporaryDirectories.push(root);
@@ -319,6 +446,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...existingConnection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			syncState: {
 				connectionFingerprint: 'a'.repeat(64),
@@ -381,6 +509,7 @@ describe('sync command registration', () => {
 		});
 		const existing = {
 			connection: { ...existingConnection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			syncState: {
 				connectionFingerprint: connectionFingerprint(existingConnection),
@@ -433,6 +562,7 @@ describe('sync command registration', () => {
 		};
 		await writeConfig(root, {
 			connection: { ...existingConnection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			syncState,
 			version: 1,
@@ -480,6 +610,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
@@ -526,6 +657,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: true },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
@@ -561,6 +693,7 @@ describe('sync command registration', () => {
 		});
 		const config = {
 			connection: { ...connection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1 as const,
 		};
@@ -596,6 +729,7 @@ describe('sync command registration', () => {
 		});
 		const existing = {
 			connection: { ...oldConnection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1 as const,
 		};
@@ -651,6 +785,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
@@ -690,6 +825,7 @@ describe('sync command registration', () => {
 		});
 		const config = {
 			connection: { ...connection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1 as const,
 		};
@@ -736,6 +872,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [],
 			version: 1,
 		});
@@ -783,6 +920,7 @@ describe('sync command registration', () => {
 		await writeFile(join(root, 'b.json'), 'old b', 'utf8');
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [],
 			version: 1,
 		});
@@ -864,6 +1002,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
@@ -916,6 +1055,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: false },
+			pushExclude: [],
 			pushInclude: [],
 			version: 1,
 		});
@@ -950,6 +1090,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: true },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});
@@ -986,6 +1127,7 @@ describe('sync command registration', () => {
 		const pushInclude = [parsePushInclude('settings.json'), parsePushInclude('sessions')];
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: true },
+			pushExclude: [],
 			pushInclude,
 			version: 1,
 		});
@@ -1022,6 +1164,7 @@ describe('sync command registration', () => {
 		const settings = parsePushInclude('settings.json');
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: true },
+			pushExclude: [],
 			pushInclude: [settings, sessions],
 			version: 1,
 		});
@@ -1058,6 +1201,7 @@ describe('sync command registration', () => {
 		});
 		await writeConfig(root, {
 			connection: { ...connection, readOnly: true },
+			pushExclude: [],
 			pushInclude: [parsePushInclude('settings.json')],
 			version: 1,
 		});

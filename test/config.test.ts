@@ -8,6 +8,7 @@ import {
 	getPrivatePaths,
 	normalizeConnection,
 	parseManifestPath,
+	parsePushExclude,
 	parsePushInclude,
 } from '../src/paths.js';
 import { createTemporaryDirectory, removeTemporaryDirectory } from './helpers.js';
@@ -24,6 +25,7 @@ function createConfig() {
 
 	return {
 		connection: { ...connection, readOnly: false },
+		pushExclude: [parsePushExclude('.DS_Store'), parsePushExclude('themes/cache')],
 		pushInclude: [parsePushInclude('settings.json'), parsePushInclude('themes')],
 		syncState: {
 			connectionFingerprint: connectionFingerprint(connection),
@@ -58,6 +60,31 @@ describe('private configuration', () => {
 		if (process.platform !== 'win32') {
 			expect((await stat(configPath)).mode & 0o777).toBe(0o600);
 		}
+	});
+
+	it('reads a configuration without pushExclude as no custom exclusions', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
+		temporaryDirectories.push(root);
+		const config = createConfig();
+		const legacy = {
+			connection: {
+				password: config.connection.password,
+				readOnly: config.connection.readOnly,
+				remotePath: config.connection.remotePath,
+				url: config.connection.url,
+				username: config.connection.username,
+			},
+			pushInclude: config.pushInclude,
+			syncState: config.syncState,
+			version: config.version,
+		};
+		const paths = getPrivatePaths(root);
+		await mkdir(paths.directory, { recursive: true });
+		await chmod(paths.directory, 0o700);
+		await writeFile(paths.configFile, `${JSON.stringify(legacy, null, 2)}\n`, 'utf8');
+		await chmod(paths.configFile, 0o600);
+
+		await expect(readConfig(root)).resolves.toEqual({ ...config, pushExclude: [] });
 	});
 
 	it('reads private configuration without mutating it', async () => {
@@ -147,6 +174,28 @@ describe('private configuration', () => {
 					],
 				},
 			}),
+		).rejects.toThrow('Invalid plugin configuration');
+	});
+
+	it('rejects invalid, duplicate, and push-selection-conflicting exclusion rules', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-config-');
+		temporaryDirectories.push(root);
+		const config = createConfig();
+
+		await expect(
+			writeConfig(root, {
+				...config,
+				pushExclude: ['themes/../escape'] as unknown as typeof config.pushExclude,
+			}),
+		).rejects.toThrow('Invalid push exclude');
+		await expect(
+			writeConfig(root, {
+				...config,
+				pushExclude: [parsePushExclude('cache'), parsePushExclude('Cache')],
+			}),
+		).rejects.toThrow('Invalid plugin configuration');
+		await expect(
+			writeConfig(root, { ...config, pushExclude: [parsePushExclude('themes')] }),
 		).rejects.toThrow('Invalid plugin configuration');
 	});
 

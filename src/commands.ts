@@ -12,10 +12,14 @@ import {
 	type ApplyResult,
 } from './local-transaction.js';
 import {
+	assertNoPathCollisions,
+	assertNoPushExcludeConflicts,
 	normalizeConnection,
 	normalizeRemotePath,
+	parsePushExclude,
 	parseRemotePath,
 	type NormalizedConnection,
+	type SafeRelativePath,
 } from './paths.js';
 import type { OperationOptions, OperationProgress } from './operation.js';
 import {
@@ -26,6 +30,7 @@ import {
 import { promptSecret } from './secret-input.js';
 import {
 	collectLocalSelection,
+	DEFAULT_PUSH_EXCLUDES,
 	DEFAULT_PUSH_INCLUDES,
 	listSelectionCandidates,
 	type LocalSelection,
@@ -46,12 +51,13 @@ import {
 	formatPlanLines,
 	runCancellableOperation,
 	selectOption,
+	selectPushExcludeAction,
 	selectPushIncludes,
 } from './ui.js';
 
 const DASHBOARD_COMMANDS = ['settings', 'status', 'diff', 'push', 'pull', 'restore'] as const;
 const SUBCOMMANDS = [...DASHBOARD_COMMANDS, 'cleanup'] as const;
-const SETTINGS_OPTIONS = ['Connection', 'Push selection', 'Cancel'] as const;
+const SETTINGS_OPTIONS = ['Connection', 'Push selection', 'Exclusions', 'Cancel'] as const;
 const PASSWORD_OPTIONS = ['Keep current password', 'Change password', 'Cancel'] as const;
 const CANCEL_OPTION = 'Cancel';
 const PROBE_RESIDUE_WARNING =
@@ -281,6 +287,7 @@ async function saveConnection(
 		connectionFingerprint(existing.connection) === connectionFingerprint(connection);
 	const config: PluginConfig = {
 		connection: { ...connection, readOnly: !writeCapability.canWrite },
+		pushExclude: existing?.pushExclude ?? [],
 		pushInclude,
 		...(sameConnection && existing.syncState !== undefined
 			? { syncState: existing.syncState }
@@ -319,6 +326,58 @@ async function runInitialConfiguration(
 	await saveConnection(ctx, agentRoot, undefined, connection, pushInclude);
 }
 
+async function promptPushExcludeRule(
+	ctx: ExtensionCommandContext,
+	pushInclude: PluginConfig['pushInclude'],
+	customRules: readonly SafeRelativePath[],
+): Promise<SafeRelativePath | undefined> {
+	while (true) {
+		const input = await ctx.ui.input('Exclude name or path');
+		if (input === undefined) {
+			return undefined;
+		}
+		try {
+			const rule = parsePushExclude(input);
+			assertNoPushExcludeConflicts(
+				pushInclude,
+				[rule],
+				'Exclusion rule conflicts with the push selection',
+			);
+			assertNoPathCollisions(
+				[...DEFAULT_PUSH_EXCLUDES, ...customRules, rule],
+				'Duplicate exclusion rule',
+			);
+			return rule;
+		} catch (error: unknown) {
+			ctx.ui.notify(userVisibleError(error), 'error');
+		}
+	}
+}
+
+async function editPushExcludes(
+	ctx: ExtensionCommandContext,
+	config: PluginConfig,
+): Promise<readonly SafeRelativePath[] | undefined> {
+	let customRules = [...config.pushExclude];
+	while (true) {
+		const action = await selectPushExcludeAction(ctx, DEFAULT_PUSH_EXCLUDES, customRules);
+		if (action === undefined) {
+			return undefined;
+		}
+		if (action.action === 'save') {
+			return customRules;
+		}
+		if (action.action === 'add') {
+			const rule = await promptPushExcludeRule(ctx, config.pushInclude, customRules);
+			if (rule !== undefined) {
+				customRules = [...customRules, rule];
+			}
+			continue;
+		}
+		customRules = customRules.filter((_rule, ruleIndex) => ruleIndex !== action.index);
+	}
+}
+
 async function runSettings(ctx: ExtensionCommandContext, agentRoot: string): Promise<void> {
 	let config = await readConfig(agentRoot);
 	if (config === undefined) {
@@ -341,16 +400,36 @@ async function runSettings(ctx: ExtensionCommandContext, agentRoot: string): Pro
 			}
 			continue;
 		}
+		if (choice === 'Exclusions') {
+			const pushExclude = await editPushExcludes(ctx, config);
+			if (pushExclude === undefined) {
+				continue;
+			}
+			config = { ...config, pushExclude };
+			await writeConfig(agentRoot, config);
+			ctx.ui.notify('Push exclusions saved.', 'info');
+			continue;
+		}
 
 		const candidates = await loadSelectionCandidates(ctx, agentRoot, config.pushInclude);
 		if (candidates === undefined) {
 			continue;
 		}
 		const pushInclude = await selectPushIncludes(ctx, candidates, config.pushInclude);
-		if (
-			pushInclude === undefined ||
-			!(await confirmOptionalPaths(ctx, pushInclude, config.pushInclude))
-		) {
+		if (pushInclude === undefined) {
+			continue;
+		}
+		try {
+			assertNoPushExcludeConflicts(
+				pushInclude,
+				config.pushExclude,
+				'Push selection conflicts with the exclusion rule',
+			);
+		} catch (error: unknown) {
+			ctx.ui.notify(userVisibleError(error), 'error');
+			continue;
+		}
+		if (!(await confirmOptionalPaths(ctx, pushInclude, config.pushInclude))) {
 			continue;
 		}
 		config = { ...config, pushInclude };
@@ -407,7 +486,12 @@ async function runDiff(ctx: ExtensionCommandContext, agentRoot: string): Promise
 	const result = await runCommandOperation(ctx, { phase: 'preparing' }, async (operation) => {
 		const [remote, selection] = await Promise.all([
 			store.readManifest(toRemoteOperationOptions(operation)),
-			collectLocalSelection({ agentRoot, includes: config.pushInclude, operation }),
+			collectLocalSelection({
+				agentRoot,
+				includes: config.pushInclude,
+				operation,
+				pushExclude: config.pushExclude,
+			}),
 		]);
 		return { plan: planPush({ local: selection, remote }), selection };
 	});

@@ -3,7 +3,7 @@ import { getKeybindings, type Component, type TUI } from '@earendil-works/pi-tui
 import { describe, expect, it, vi } from 'vitest';
 
 import { SyncOperationCancelledError } from '../src/operation.js';
-import { parseManifestPath, type SafeRelativePath } from '../src/paths.js';
+import { parseManifestPath, parsePushExclude, type SafeRelativePath } from '../src/paths.js';
 import type { SelectionCandidate } from '../src/selection.js';
 import {
 	confirmDialog,
@@ -12,6 +12,7 @@ import {
 	formatPlanLines,
 	runCancellableOperation,
 	selectOption,
+	selectPushExcludeAction,
 	selectPushIncludes,
 } from '../src/ui.js';
 
@@ -349,6 +350,73 @@ describe('selectPushIncludes', () => {
 		expect(text).toContain('→ [x] settings.json (default)');
 		expect(text).toContain('[ ] auth.json');
 		expect(text).toContain('toggle');
+	});
+});
+
+describe('selectPushExcludeAction', () => {
+	const builtIn = [parsePushExclude('.DS_Store'), parsePushExclude('Thumbs.db')];
+	const rules = [parsePushExclude('cache'), parsePushExclude('themes/tmp')];
+
+	it('requests an add action', async () => {
+		const ctx = createContext((component) => {
+			component.handleInput?.('a');
+		});
+		await expect(selectPushExcludeAction(ctx, builtIn, rules)).resolves.toEqual({ action: 'add' });
+	});
+
+	it('reports the focused rule for deletion', async () => {
+		const ctx = createContext((component) => {
+			component.handleInput?.('j');
+			component.handleInput?.('d');
+		});
+		await expect(selectPushExcludeAction(ctx, builtIn, rules)).resolves.toEqual({
+			action: 'delete',
+			index: 1,
+		});
+	});
+
+	it('saves on enter and cancels on escape', async () => {
+		await expect(
+			selectPushExcludeAction(
+				createContext((component) => component.handleInput?.('\r')),
+				builtIn,
+				rules,
+			),
+		).resolves.toEqual({ action: 'save' });
+		await expect(
+			selectPushExcludeAction(
+				createContext((component) => component.handleInput?.('\x1b')),
+				builtIn,
+				rules,
+			),
+		).resolves.toBeUndefined();
+	});
+
+	it('renders built-in rules, custom rules, and key hints', async () => {
+		let rendered: string[] = [];
+		const ctx = createContext((component, done) => {
+			rendered = component.render(60);
+			done(undefined as never);
+		});
+		await selectPushExcludeAction(ctx, builtIn, rules);
+		const text = rendered.join('\n');
+		expect(text).toContain('Built-in (always excluded)');
+		expect(text).toContain('.DS_Store');
+		expect(text).toContain('Custom rules');
+		expect(text).toContain('→ cache');
+		expect(text).toContain('add');
+		expect(text).toContain('delete');
+	});
+
+	it('ignores delete when no custom rule exists', async () => {
+		let rendered: string[] = [];
+		const ctx = createContext((component) => {
+			component.handleInput?.('d');
+			rendered = component.render(60);
+			component.handleInput?.('\r');
+		});
+		await expect(selectPushExcludeAction(ctx, builtIn, [])).resolves.toEqual({ action: 'save' });
+		expect(rendered.join('\n')).toContain('(none)');
 	});
 });
 

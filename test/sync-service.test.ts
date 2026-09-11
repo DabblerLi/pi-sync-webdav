@@ -1,4 +1,4 @@
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 
 import { SettingsManager } from '@earendil-works/pi-coding-agent';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,6 +12,7 @@ import {
 import {
 	getPrivatePaths,
 	parseManifestPath,
+	parsePushExclude,
 	parsePushInclude,
 	parseRemotePath,
 	normalizeConnection,
@@ -62,6 +63,7 @@ async function createStore(remotePath = 'pi-sync-webdav') {
 function pluginConfig(connection: ReturnType<typeof normalizeConnection>): PluginConfig {
 	return {
 		connection: { ...connection, readOnly: false },
+		pushExclude: [],
 		pushInclude: [parsePushInclude('settings.json')],
 		version: 1,
 	};
@@ -89,6 +91,45 @@ describe('sync service', () => {
 		expect((await readConfig(root))?.syncState).toMatchObject({
 			managedPaths: [parseManifestPath('settings.json')],
 		});
+	});
+
+	it('excludes configured files from the next pushed revision', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-service-');
+		temporaryDirectories.push(root);
+		const { connection, gateway, server, store } = await createStore();
+		const config = {
+			...pluginConfig(connection),
+			pushExclude: [parsePushExclude('cache')],
+			pushInclude: [parsePushInclude('themes')],
+		};
+		await mkdir(`${root}/themes/cache`, { recursive: true });
+		await writeFile(`${root}/themes/dark.json`, '{}', 'utf8');
+		await writeFile(`${root}/themes/.DS_Store`, 'junk', 'utf8');
+		await writeFile(`${root}/themes/cache/entry.json`, '{}', 'utf8');
+		await store.publishRevision({
+			allowUnverifiedManifest: false,
+			expectedManifestSha256: undefined,
+			files: [
+				{ contents: Buffer.from('{}'), path: parseManifestPath('themes/dark.json') },
+				{ contents: Buffer.from('junk'), path: parseManifestPath('themes/.DS_Store') },
+			],
+		});
+		server.requests.splice(0);
+
+		const preparation = await preparePush({ agentRoot: root, config, store });
+		expect(preparation.plan.actions.map((action) => [action.path, action.action])).toEqual([
+			['themes/.DS_Store', 'delete'],
+		]);
+
+		const published = await publishPreparedPush(root, preparation, {
+			allowUnverifiedManifest: false,
+		});
+		expect(published.manifest.files.map((file) => file.path)).toEqual(['themes/dark.json']);
+		const revisionRoot = `pi-sync-webdav/revisions/${published.manifest.revision}`;
+		await expect(
+			gateway.directoryContents(parseRemotePath(`${revisionRoot}/themes`)),
+		).resolves.toEqual([{ basename: 'dark.json', type: 'file' }]);
+		expect(server.requests.filter((request) => request.method === 'COPY')).toHaveLength(1);
 	});
 
 	it('requires an explicit confirmation flag before replacing an invalid manifest', async () => {
