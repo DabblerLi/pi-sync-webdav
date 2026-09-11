@@ -318,9 +318,6 @@ export function isPermanentlyExcluded(path: string): boolean {
 
 /** Rules without '/' match a path component at any depth; rules with '/' match one relative path. */
 export function isPushExcluded(path: string, pushExclude: readonly SafeRelativePath[]): boolean {
-	if (pushExclude.length === 0) {
-		return false;
-	}
 	const components = path.split('/').map((component) => component.toLocaleLowerCase('en-US'));
 	const normalizedPath = components.join('/');
 	return pushExclude.some((rule) => {
