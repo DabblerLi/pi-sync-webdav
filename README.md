@@ -1,7 +1,7 @@
 <h1 align="center">pi-sync-webdav</h1>
 
 <p align="center">
-  <a href="README.zh-CN.md">简体中文</a>
+  English | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
