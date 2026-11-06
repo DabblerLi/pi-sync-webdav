@@ -13,7 +13,7 @@
 
 Private data lives under the effective Pi agent directory in `pi-sync-webdav/` and is never synced.
 
-- Configuration and credentials use mode `0600` where supported. A pull repairs `auth.json` to mode `0600` where supported even when its contents are unchanged.
+- Configuration and credentials use mode `0600` where supported. A pull repairs `auth.json` and `mcp-auth.json` to mode `0600` where supported even when their contents are unchanged.
 - `backups/` holds the files replaced or removed by the most recent pull that changed local files; the first backup write of a later pull replaces the previous set.
 - A local temporary workspace stages downloads for verification before local replacement. It is removed when the pull finishes, and stale workspaces from interrupted pulls are removed when the next pull starts.
 - The configuration stores one connection, the push include list, the push exclusion rules, and minimal sync state.
@@ -43,7 +43,7 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 - The local include list and exclusion rules affect push only. Pull always applies the remote manifest.
 - Each pull detects the destination's case sensitivity with a probe file inside the plugin's private directory.
 - Only files listed in the manifest are materialized; absent or empty directories are not created by pull, and directories left empty by pull deletions are removed.
-- Pushes and pulls with changes present one batch confirmation using file paths and add/update/delete actions. A permission-only `SECURE auth.json` action is also confirmed. The plan list scrolls inside the dialog with j/k and page keys, and warnings stay pinned above the confirm options.
+- Pushes and pulls with changes present one batch confirmation using file paths and add/update/delete actions. A permission-only `SECURE auth.json` or `SECURE mcp-auth.json` action is also confirmed. The plan list scrolls inside the dialog with j/k and page keys, and warnings stay pinned above the confirm options.
 - Pull downloads and verifies only added or updated files before replacing local files. Unchanged files, deletions, and permission-only repairs require no file download. Local backups are created before overwrites or managed-file deletions.
 - Pull deletes only paths recorded in matching local sync state that are absent from the current manifest. First pull or a changed connection never deletes local files. When such a removal and a manifest path resolve to the same destination, the removal is applied first and the replacement is always downloaded and written afterwards.
 - Independent file reads, validation, uploads, downloads, and the server-side copies that reuse unchanged entries run with a concurrency limit of four. Manifest activation, backups, local application, and rollback remain serial.
@@ -59,7 +59,7 @@ If a manifest is unsupported, malformed, or otherwise invalid, pull rejects it. 
 - Top-level `npm/`, `git/`, and the plugin private directory are never synced. `logs/` and `node_modules/` are excluded at every depth.
 - Push always skips built-in OS metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`); the private configuration adds further exclusion rules. A rule without `/` matches a path component at any depth, whether it names a file or a directory; a rule with `/` matches one relative path; matching is case-insensitive. Rules filter entries inside a push selection, and a rule that names a selected top-level entry is rejected when configuration is validated.
 - Exclusion rules do not restrict manifest paths: pull applies remote manifests that contain those names.
-- `sessions/` and `auth.json` are opt-in. The extra confirmation appears when such a path is added to the push selection and is remembered while it remains selected; removing it and adding it again requires confirmation again. `auth.json` is restored with mode `0600`.
+- `sessions/`, `auth.json`, and `mcp-auth.json` are opt-in. The extra confirmation appears when such a path is added to the push selection and is remembered while it remains selected; removing it and adding it again requires confirmation again. `auth.json` and `mcp-auth.json` are restored with mode `0600`.
 - Selected text files receive local secret-pattern warnings. Secrets, credentials, file contents, and Authorization headers are never rendered or logged.
 - HTTPS is required by default; HTTP requires explicit confirmation. Invalid or self-signed TLS certificates are rejected. A connection must prove read access before it can be saved; a failed write probe produces an explicitly read-only connection.
 - Limits: 50 MiB per file and 500 MiB per operation.

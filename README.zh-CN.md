@@ -54,7 +54,7 @@ pi update --extensions
 
 ## 同步内容
 
-默认 push 选择范围：`settings.json`、`keybindings.json`、`AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md`、`models.json`、`themes/`、`prompts/`、`skills/`、`extensions/`。
+默认 push 选择范围：`settings.json`、`keybindings.json`、`AGENTS.md`、`SYSTEM.md`、`APPEND_SYSTEM.md`、`mcp.json`、`models.json`、`themes/`、`prompts/`、`skills/`、`extensions/`。
 
 可在 **settings** 中修改选择范围，目录递归同步。选择范围只影响 `push`；`pull` 始终应用完整的远端文件集。
 
@@ -62,7 +62,7 @@ pi update --extensions
 
 `.DS_Store`、`Thumbs.db`、`desktop.ini` 不会随 push 上传。可在 **settings** → Exclusions 添加更多规则：不含 `/` 的名称匹配任意层级的同名文件和目录，含 `/` 的条目匹配一个相对路径。规则只筛选 Push selection 中勾选的顶层条目的内容；要让某个顶层条目整体不同步，请在那里取消勾选。
 
-`sessions/` 和 `auth.json` 默认不选中。将它们加入选择范围时需要额外确认。注意将敏感数据只同步到你信任的远端。
+`sessions/`、`auth.json` 和 `mcp-auth.json` 默认不选中。将它们加入选择范围时需要额外确认。注意将敏感数据只同步到你信任的远端。
 
 ## 同步工作原理
 

@@ -54,7 +54,7 @@ pi update --extensions
 
 ## What syncs
 
-Default push selection: `settings.json`, `keybindings.json`, `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `models.json`, `themes/`, `prompts/`, `skills/`, `extensions/`.
+Default push selection: `settings.json`, `keybindings.json`, `AGENTS.md`, `SYSTEM.md`, `APPEND_SYSTEM.md`, `mcp.json`, `models.json`, `themes/`, `prompts/`, `skills/`, `extensions/`.
 
 Change the selection under **settings**. Directories sync recursively. The selection only affects `push`; `pull` always applies the full remote file set.
 
@@ -62,7 +62,7 @@ The top-level `npm/`, `git/`, and `pi-sync-webdav/` directories are never synced
 
 `.DS_Store`, `Thumbs.db`, and `desktop.ini` are skipped by push. Add more rules under **settings** → Exclusions: a name without `/` matches files and directories at any depth, and an entry with `/` matches one relative path. Rules filter the contents of the top-level entries you check in the push selection; to stop syncing a whole entry, turn it off there.
 
-`sessions/` and `auth.json` are off by default. Adding one to the selection asks for an extra confirmation. Only sync sensitive data to a remote you trust.
+`sessions/`, `auth.json`, and `mcp-auth.json` are off by default. Adding one to the selection asks for an extra confirmation. Only sync sensitive data to a remote you trust.
 
 ## How sync works
 
