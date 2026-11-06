@@ -75,7 +75,7 @@ The top-level `npm/`, `git/`, and `pi-sync-webdav/` directories are never synced
 
 - HTTPS is required by default. HTTP needs an explicit warning confirmation. Self-signed or invalid TLS certificates are rejected.
 - If the remote folder can be read but not written, the connection is saved as read-only. You can still use `status`, `diff`, and `pull`; `push` and residue cleanup are unavailable.
-- Saving a connection only tests access—it never starts a push or pull.
+- Saving a connection only tests access—it never starts a push or pull. When validation fails, the entered values stay available: press Enter to keep a value, or edit the fields that were wrong and retry.
 - Long-running actions show progress and can be cancelled with Esc.
 - If an operation reports remote residue, run `/sync-webdav cleanup` to remove it.
 
