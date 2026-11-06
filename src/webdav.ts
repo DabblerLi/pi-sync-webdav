@@ -124,6 +124,13 @@ function discardResponseBody(value: unknown): void {
 	}
 }
 
+function requireNodeReadable(value: unknown): Readable {
+	if (!(value instanceof Readable)) {
+		throw new WebDavRequestError('WebDAV response stream is invalid', { retryable: false });
+	}
+	return value;
+}
+
 function assertPositiveSafeInteger(value: number, name: string): void {
 	if (!Number.isSafeInteger(value) || value <= 0) {
 		throw new Error(`Invalid ${name}`);
@@ -378,7 +385,12 @@ class SafeWebDavGateway implements WebDavGateway {
 		const remotePath = parseRemotePath(path);
 		return this.#execute(async (signal) => {
 			const stream = this.#client.createReadStream(remotePath, { signal });
-			return readStreamWithLimit(stream, this.#maxResponseBytes, onProgress, signal);
+			return readStreamWithLimit(
+				requireNodeReadable(stream),
+				this.#maxResponseBytes,
+				onProgress,
+				signal,
+			);
 		}, normalizeRequestOptions(options));
 	}
 
@@ -414,11 +426,12 @@ class SafeWebDavGateway implements WebDavGateway {
 			},
 			signal,
 		});
-		if (response.body === null) {
+		const body = isRecord(response) ? response.body : undefined;
+		if (body === null || body === undefined) {
 			throw new WebDavRequestError('WebDAV response has no body', { retryable: false });
 		}
 		return readStreamWithLimit(
-			response.body as unknown as Readable,
+			requireNodeReadable(body),
 			this.#maxResponseBytes,
 			undefined,
 			signal,
