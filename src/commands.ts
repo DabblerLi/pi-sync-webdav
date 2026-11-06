@@ -18,6 +18,7 @@ import {
 	normalizeRemotePath,
 	parsePushExclude,
 	parseRemotePath,
+	type ConnectionInput,
 	type NormalizedConnection,
 	type SafeRelativePath,
 } from './paths.js';
@@ -180,10 +181,29 @@ async function loadSelectionCandidates(
 	return result.value;
 }
 
+/** Prompts for a connection field, keeping the previous value when the input is empty. */
+async function promptConnectionField(
+	ctx: ExtensionCommandContext,
+	label: string,
+	previous: string | undefined,
+): Promise<string | undefined> {
+	const value = await ctx.ui.input(
+		previous === undefined ? label : `${label} (Enter keeps ${previous})`,
+	);
+	if (value === undefined) {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	return trimmed.length === 0 ? (previous ?? '') : trimmed;
+}
+
 /** Prompts for the remote path and re-prompts on invalid input. */
-async function promptRemotePath(ctx: ExtensionCommandContext): Promise<string | undefined> {
+async function promptRemotePath(
+	ctx: ExtensionCommandContext,
+	previous: string | undefined,
+): Promise<string | undefined> {
 	while (true) {
-		const remotePath = await ctx.ui.input('Remote path');
+		const remotePath = await promptConnectionField(ctx, 'Remote path', previous);
 		if (remotePath === undefined) {
 			return undefined;
 		}
@@ -199,23 +219,23 @@ async function promptRemotePath(ctx: ExtensionCommandContext): Promise<string | 
 
 async function promptConnection(
 	ctx: ExtensionCommandContext,
-	existing: PluginConfig | undefined,
+	previous: ConnectionInput | undefined,
 ): Promise<NormalizedConnection | undefined> {
-	const url = await ctx.ui.input('WebDAV URL');
+	const url = await promptConnectionField(ctx, 'WebDAV URL', previous?.url);
 	if (url === undefined) {
 		return undefined;
 	}
-	const remotePath = await promptRemotePath(ctx);
+	const remotePath = await promptRemotePath(ctx, previous?.remotePath);
 	if (remotePath === undefined) {
 		return undefined;
 	}
-	const username = await ctx.ui.input('Username');
+	const username = await promptConnectionField(ctx, 'Username', previous?.username);
 	if (username === undefined) {
 		return undefined;
 	}
 
 	let password: string;
-	if (existing === undefined) {
+	if (previous === undefined) {
 		const enteredPassword = await promptSecret(ctx, 'WebDAV password');
 		if (enteredPassword === undefined) {
 			return undefined;
@@ -227,7 +247,7 @@ async function promptConnection(
 			return undefined;
 		}
 		if (choice === 'Keep current password') {
-			password = existing.connection.password;
+			password = previous.password;
 		} else {
 			const enteredPassword = await promptSecret(ctx, 'WebDAV password');
 			if (enteredPassword === undefined) {
@@ -251,40 +271,59 @@ async function promptConnection(
 	return connection;
 }
 
+type SaveConnectionOutcome =
+	| {
+			readonly config: PluginConfig;
+			readonly status: 'saved';
+	  }
+	| {
+			readonly message: string;
+			readonly status: 'failed';
+	  }
+	| { readonly status: 'cancelled' };
+
 async function saveConnection(
 	ctx: ExtensionCommandContext,
 	agentRoot: string,
 	existing: PluginConfig | undefined,
 	connection: NormalizedConnection,
 	pushInclude: PluginConfig['pushInclude'],
-): Promise<PluginConfig | undefined> {
+): Promise<SaveConnectionOutcome> {
 	const store = new RemoteStore(
 		createWebDavGateway(connection),
 		parseRemotePath(connection.remotePath),
 	);
 	let cancelledProbeCleanupFailed = false;
-	const validation = await runCommandOperation(ctx, { phase: 'validating' }, async (operation) => {
-		try {
-			const remoteOperation = toRemoteOperationOptions(operation);
-			const root = await store.ensureRoot(remoteOperation);
-			if (root.kind === 'foreign') {
-				throw new Error('The remote root contains unrecognized files');
+	let validation: {
+		readonly cancelled: boolean;
+		readonly value: Awaited<ReturnType<RemoteStore['verifyWriteCapability']>> | undefined;
+	};
+	try {
+		validation = await runCommandOperation(ctx, { phase: 'validating' }, async (operation) => {
+			try {
+				const remoteOperation = toRemoteOperationOptions(operation);
+				const root = await store.ensureRoot(remoteOperation);
+				if (root.kind === 'foreign') {
+					throw new Error('The remote root contains unrecognized files');
+				}
+				await store.readRawManifest(remoteOperation);
+				return store.verifyWriteCapability(remoteOperation);
+			} catch (error: unknown) {
+				if (error instanceof WriteCapabilityProbeCancelledError) {
+					cancelledProbeCleanupFailed = error.cleanupFailed;
+				}
+				throw error;
 			}
-			await store.readRawManifest(remoteOperation);
-			return store.verifyWriteCapability(remoteOperation);
-		} catch (error: unknown) {
-			if (error instanceof WriteCapabilityProbeCancelledError) {
-				cancelledProbeCleanupFailed = error.cleanupFailed;
-			}
-			throw error;
-		}
-	});
+		});
+	} catch (error: unknown) {
+		return { message: userVisibleError(error), status: 'failed' };
+	}
 	if (validation.cancelled || validation.value === undefined) {
 		if (cancelledProbeCleanupFailed) {
 			ctx.ui.notify(PROBE_RESIDUE_WARNING, 'warning');
 		}
 		ctx.ui.notify('Connection validation cancelled.', 'info');
-		return undefined;
+		return { status: 'cancelled' };
 	}
 	const writeCapability = validation.value;
 	const sameConnection =
@@ -309,7 +348,33 @@ async function saveConnection(
 			: 'WebDAV connection saved in read-only mode.',
 		writeCapability.canWrite ? 'info' : 'warning',
 	);
-	return config;
+	return { config, status: 'saved' };
+}
+
+/** Saves a connection, re-prompting with the edited values when validation fails. */
+async function saveConnectionWithRetry(
+	ctx: ExtensionCommandContext,
+	agentRoot: string,
+	existing: PluginConfig | undefined,
+	connection: NormalizedConnection,
+	pushInclude: PluginConfig['pushInclude'],
+): Promise<PluginConfig | undefined> {
+	let current = connection;
+	while (true) {
+		const outcome = await saveConnection(ctx, agentRoot, existing, current, pushInclude);
+		if (outcome.status === 'saved') {
+			return outcome.config;
+		}
+		if (outcome.status === 'cancelled') {
+			return undefined;
+		}
+		ctx.ui.notify(outcome.message, 'error');
+		const retried = await promptConnection(ctx, current);
+		if (retried === undefined) {
+			return undefined;
+		}
+		current = retried;
+	}
 }
 
 async function runInitialConfiguration(
@@ -328,7 +393,7 @@ async function runInitialConfiguration(
 	if (pushInclude === undefined || !(await confirmOptionalPaths(ctx, pushInclude, []))) {
 		return;
 	}
-	await saveConnection(ctx, agentRoot, undefined, connection, pushInclude);
+	await saveConnectionWithRetry(ctx, agentRoot, undefined, connection, pushInclude);
 }
 
 async function promptPushExcludeRule(
@@ -396,9 +461,15 @@ async function runSettings(ctx: ExtensionCommandContext, agentRoot: string): Pro
 			return;
 		}
 		if (choice === 'Connection') {
-			const connection = await promptConnection(ctx, config);
+			const connection = await promptConnection(ctx, config.connection);
 			if (connection !== undefined) {
-				const saved = await saveConnection(ctx, agentRoot, config, connection, config.pushInclude);
+				const saved = await saveConnectionWithRetry(
+					ctx,
+					agentRoot,
+					config,
+					connection,
+					config.pushInclude,
+				);
 				if (saved !== undefined) {
 					config = saved;
 				}
