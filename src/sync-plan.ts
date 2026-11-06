@@ -18,6 +18,7 @@ import {
 import {
 	assertNoPathCollisions,
 	assertSafeLocalTarget,
+	isCredentialFile,
 	parseManifestPath,
 	pathsCollide,
 	type SafeRelativePath,
@@ -308,7 +309,7 @@ export async function planPull(input: PlanPullInput): Promise<PullPlan> {
 			continue;
 		}
 		if (
-			file.path === 'auth.json' &&
+			isCredentialFile(file.path) &&
 			(process.platform === 'win32' || (local.mode & 0o7777) !== 0o600)
 		) {
 			actions.push({

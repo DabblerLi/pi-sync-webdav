@@ -73,6 +73,11 @@ const OPTIONAL_PATH_CONFIRMATIONS = [
 		path: 'auth.json',
 		title: 'Include authentication?',
 	},
+	{
+		message: 'MCP OAuth credentials are sensitive. Continue?',
+		path: 'mcp-auth.json',
+		title: 'Include MCP authentication?',
+	},
 ] as const;
 
 type SyncWebdavSubcommand = (typeof SUBCOMMANDS)[number] | 'dashboard';

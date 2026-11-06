@@ -18,6 +18,7 @@ const WINDOWS_RESERVED_DEVICE_NAME_PATTERN =
 	/^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\..*)?$/iu;
 const PERMANENTLY_EXCLUDED_TOP_LEVEL_NAMES = new Set(['npm', 'git', PRIVATE_DIRECTORY_NAME]);
 const RECURSIVELY_EXCLUDED_NAMES = new Set(['logs', 'node_modules']);
+const CREDENTIAL_FILE_NAMES = new Set(['auth.json', 'mcp-auth.json']);
 
 export interface ConnectionInput {
 	readonly password: string;
@@ -306,6 +307,10 @@ export function parsePushExclude(value: unknown): SafeRelativePath {
 	const path = parseLogicalRelativePath(value, 'Invalid push exclude');
 	assertWindowsSafeLocalPath(path, 'Invalid push exclude');
 	return path as SafeRelativePath;
+}
+
+export function isCredentialFile(path: string): boolean {
+	return CREDENTIAL_FILE_NAMES.has(path);
 }
 
 export function isPermanentlyExcluded(path: string): boolean {

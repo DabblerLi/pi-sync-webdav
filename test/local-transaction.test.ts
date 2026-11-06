@@ -437,36 +437,39 @@ describe('pull transaction', () => {
 		expect(await readFile(join(backupsDirectory, 'test.json'), 'utf8')).toBe('old test');
 	});
 
-	it('repairs auth.json permissions without rewriting matching contents or creating a backup', async () => {
-		if (process.platform === 'win32') {
-			return;
-		}
-		const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
-		temporaryDirectories.push(root);
-		const authPath = join(root, 'auth.json');
-		await writeFile(authPath, 'private', 'utf8');
-		await chmod(authPath, 0o644);
-		const manifest = createManifest([{ contents: 'private', path: 'auth.json' }]);
-		const workspace = await createPullWorkspace(root);
-		const plan: PullPlan = {
-			actions: [
-				{
-					action: 'secure',
-					expectedLocal: expected('private'),
-					path: parseManifestPath('auth.json'),
-					source: source(manifest, 'auth.json'),
-				},
-			],
-			downloads: [],
-			nextManagedPaths: manifest.files.map((file) => file.path),
-		};
+	it.each(['auth.json', 'mcp-auth.json'])(
+		'repairs %s permissions without rewriting matching contents or creating a backup',
+		async (path) => {
+			if (process.platform === 'win32') {
+				return;
+			}
+			const root = await createTemporaryDirectory('pi-sync-webdav-transaction-');
+			temporaryDirectories.push(root);
+			const authPath = join(root, path);
+			await writeFile(authPath, 'private', 'utf8');
+			await chmod(authPath, 0o644);
+			const manifest = createManifest([{ contents: 'private', path }]);
+			const workspace = await createPullWorkspace(root);
+			const plan: PullPlan = {
+				actions: [
+					{
+						action: 'secure',
+						expectedLocal: expected('private'),
+						path: parseManifestPath(path),
+						source: source(manifest, path),
+					},
+				],
+				downloads: [],
+				nextManagedPaths: manifest.files.map((file) => file.path),
+			};
 
-		await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({ status: 'applied' });
-		expect(await readFile(authPath, 'utf8')).toBe('private');
-		expect((await stat(authPath)).mode & 0o777).toBe(0o600);
-		await expect(listBackups(root)).resolves.toEqual([]);
-		await disposePullWorkspace(root, workspace);
-	});
+			await expect(applyPullPlan(root, workspace, plan)).resolves.toEqual({ status: 'applied' });
+			expect(await readFile(authPath, 'utf8')).toBe('private');
+			expect((await stat(authPath)).mode & 0o777).toBe(0o600);
+			await expect(listBackups(root)).resolves.toEqual([]);
+			await disposePullWorkspace(root, workspace);
+		},
+	);
 
 	it('matches Pi permissions for added, updated, and restored regular files', async () => {
 		if (process.platform === 'win32') {

@@ -11,6 +11,7 @@ import {
 	type OperationOptions,
 } from './operation.js';
 import {
+	isCredentialFile,
 	isPermanentlyExcluded,
 	isPushExcluded,
 	parseManifestPath,
@@ -26,6 +27,7 @@ export const DEFAULT_PUSH_INCLUDES = [
 	'AGENTS.md',
 	'SYSTEM.md',
 	'APPEND_SYSTEM.md',
+	'mcp.json',
 	'models.json',
 	'themes',
 	'prompts',
@@ -367,7 +369,9 @@ export async function collectLocalSelection(input: {
 				const contents = await readRegularFileSnapshot(absolutePath, {
 					errorMessage: 'Unable to read selected file',
 					maxBytes: MAX_FILE_BYTES,
-					...(relativePath === 'auth.json' && input.enforceAuthPermissions ? { mode: 0o600 } : {}),
+					...(isCredentialFile(relativePath) && input.enforceAuthPermissions
+						? { mode: 0o600 }
+						: {}),
 				});
 				throwIfOperationCancelled(input.operation?.signal);
 				if (contents === undefined) {

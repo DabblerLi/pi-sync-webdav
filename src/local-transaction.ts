@@ -4,7 +4,12 @@ import { basename, dirname, join, resolve } from 'node:path';
 
 import type { ManifestFile } from './manifest.js';
 import { MAX_FILE_BYTES, MAX_OPERATION_BYTES } from './manifest.js';
-import { getPrivatePaths, parseManifestPath, type SafeRelativePath } from './paths.js';
+import {
+	getPrivatePaths,
+	isCredentialFile,
+	parseManifestPath,
+	type SafeRelativePath,
+} from './paths.js';
 import { throwIfOperationCancelled, type OperationOptions } from './operation.js';
 import { readRegularFileSnapshot } from './safe-files.js';
 import type { ExpectedLocalState, PullPlan } from './sync-plan.js';
@@ -506,14 +511,14 @@ async function writeActiveFile(
 	const target = toAbsolutePath(root, path);
 	const parentSegments = path.split('/').slice(0, -1);
 	await ensureSafeDirectories(root, parentSegments, 0o755, 'Unsafe local target');
-	const authFile = path === 'auth.json';
-	const mode = authFile ? 0o600 : (previousMode ?? 0o666);
+	const credentialFile = isCredentialFile(path);
+	const mode = credentialFile ? 0o600 : (previousMode ?? 0o666);
 	await writeAtomically(target, contents, {
-		enforceMode: authFile || (previousMode !== undefined && process.platform !== 'win32'),
+		enforceMode: credentialFile || (previousMode !== undefined && process.platform !== 'win32'),
 		mode,
 		requireAbsent,
 	});
-	if (authFile) {
+	if (credentialFile) {
 		try {
 			await fs.chmod(target, 0o600);
 		} catch {
@@ -764,7 +769,7 @@ export async function applyPullPlan(
 			const previous = await readActiveSnapshot(agentRoot, mutation.path, mutation.expectedLocal);
 			throwIfOperationCancelled(operation?.signal);
 			if (mutation.action === 'secure') {
-				if (mutation.path !== 'auth.json' || previous === undefined) {
+				if (!isCredentialFile(mutation.path) || previous === undefined) {
 					throw new Error('Local target changed');
 				}
 				const root = assertSafeAgentRoot(agentRoot);

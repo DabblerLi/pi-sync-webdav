@@ -42,6 +42,7 @@ describe('selection candidates', () => {
 			'AGENTS.md',
 			'SYSTEM.md',
 			'APPEND_SYSTEM.md',
+			'mcp.json',
 			'models.json',
 			'themes',
 			'prompts',
