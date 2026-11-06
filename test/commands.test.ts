@@ -262,6 +262,73 @@ describe('sync command registration', () => {
 		});
 	});
 
+	it('re-prompts for an invalid URL without abandoning the configuration', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const { command: registered } = registerTestCommand(root);
+		const notify = vi.fn();
+		const input = vi
+			.fn()
+			.mockResolvedValueOnce('dav.example.com')
+			.mockResolvedValueOnce(server.baseUrl)
+			.mockResolvedValueOnce('pi-sync-webdav')
+			.mockResolvedValueOnce('alice');
+		const driver = createCustomDriver([
+			valueStep('password'),
+			valueStep(true),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('settings.json')]),
+			{ type: 'complete' },
+		]);
+
+		await registered.handler('', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(input).toHaveBeenCalledTimes(4);
+		expect(notify).toHaveBeenCalledWith('Invalid WebDAV URL', 'error');
+		expect(await readConfig(root)).toMatchObject({
+			connection: { username: 'alice' },
+			pushInclude: [parsePushInclude('settings.json')],
+		});
+	});
+
+	it('re-prompts for an empty password without abandoning the configuration', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const { command: registered } = registerTestCommand(root);
+		const notify = vi.fn();
+		const input = vi
+			.fn()
+			.mockResolvedValueOnce(server.baseUrl)
+			.mockResolvedValueOnce('pi-sync-webdav')
+			.mockResolvedValueOnce('alice');
+		const driver = createCustomDriver([
+			valueStep(''),
+			valueStep('password'),
+			valueStep(true),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('settings.json')]),
+			{ type: 'complete' },
+		]);
+
+		await registered.handler('', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(notify).toHaveBeenCalledWith('The password cannot be empty', 'error');
+		expect(await readConfig(root)).toMatchObject({
+			connection: { password: 'password', username: 'alice' },
+			pushInclude: [parsePushInclude('settings.json')],
+		});
+	});
+
 	it('does not save initial configuration when connection validation is cancelled', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
 		temporaryDirectories.push(root);

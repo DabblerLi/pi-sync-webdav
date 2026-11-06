@@ -160,7 +160,15 @@ function parseLogicalRelativePath(
 	return canonical;
 }
 
-function normalizeWebDavUrl(value: unknown): NormalizedUrl {
+export function normalizeUsername(value: unknown): string {
+	assertNonEmptyString(value, 'Invalid Basic Auth username');
+	if (value.includes(':') || hasControlCharacters(value)) {
+		throw new Error('Invalid Basic Auth username');
+	}
+	return value;
+}
+
+export function normalizeWebDavUrl(value: unknown): NormalizedUrl {
 	assertNonEmptyString(value, 'Invalid WebDAV URL');
 	if (hasControlCharacters(value)) {
 		throw new Error('Invalid WebDAV URL');
@@ -269,10 +277,7 @@ export function normalizeConnection(input: ConnectionInput): NormalizedConnectio
 	if (!isRecord(input)) {
 		throw new Error('Invalid connection');
 	}
-	assertNonEmptyString(input.username, 'Invalid Basic Auth username');
-	if (input.username.includes(':') || hasControlCharacters(input.username)) {
-		throw new Error('Invalid Basic Auth username');
-	}
+	const username = normalizeUsername(input.username);
 	assertNonEmptyString(input.password, 'Invalid Basic Auth password');
 
 	const url = normalizeWebDavUrl(input.url);
@@ -281,7 +286,7 @@ export function normalizeConnection(input: ConnectionInput): NormalizedConnectio
 		remotePath: normalizeRemotePath(input.remotePath),
 		requiresInsecureTransportConfirmation: url.startsWith('http://'),
 		url,
-		username: input.username,
+		username,
 	};
 }
 

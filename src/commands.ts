@@ -16,6 +16,8 @@ import {
 	assertNoPushExcludeConflicts,
 	normalizeConnection,
 	normalizeRemotePath,
+	normalizeUsername,
+	normalizeWebDavUrl,
 	parsePushExclude,
 	parseRemotePath,
 	type ConnectionInput,
@@ -181,39 +183,43 @@ async function loadSelectionCandidates(
 	return result.value;
 }
 
-/** Prompts for a connection field, keeping the previous value when the input is empty. */
+/**
+ * Prompts for a connection field, keeping the previous value when the input is
+ * empty and re-prompting on invalid input.
+ */
 async function promptConnectionField(
 	ctx: ExtensionCommandContext,
 	label: string,
 	previous: string | undefined,
-): Promise<string | undefined> {
-	const value = await ctx.ui.input(
-		previous === undefined ? label : `${label} (Enter keeps ${previous})`,
-	);
-	if (value === undefined) {
-		return undefined;
-	}
-	const trimmed = value.trim();
-	return trimmed.length === 0 ? (previous ?? '') : trimmed;
-}
-
-/** Prompts for the remote path and re-prompts on invalid input. */
-async function promptRemotePath(
-	ctx: ExtensionCommandContext,
-	previous: string | undefined,
+	validate: (value: string) => void,
 ): Promise<string | undefined> {
 	while (true) {
-		const remotePath = await promptConnectionField(ctx, 'Remote path', previous);
-		if (remotePath === undefined) {
+		const value = await ctx.ui.input(
+			previous === undefined ? label : `${label} (Enter keeps ${previous})`,
+		);
+		if (value === undefined) {
 			return undefined;
 		}
+		const trimmed = value.trim();
+		const candidate = trimmed.length === 0 ? (previous ?? '') : trimmed;
 		try {
-			normalizeRemotePath(remotePath);
+			validate(candidate);
 		} catch (error: unknown) {
 			ctx.ui.notify(userVisibleError(error), 'error');
 			continue;
 		}
-		return remotePath;
+		return candidate;
+	}
+}
+
+/** Prompts for a non-empty password, re-prompting when the input is empty. */
+async function promptPassword(ctx: ExtensionCommandContext): Promise<string | undefined> {
+	while (true) {
+		const password = await promptSecret(ctx, 'WebDAV password');
+		if (password === undefined || password.length > 0) {
+			return password;
+		}
+		ctx.ui.notify('The password cannot be empty', 'error');
 	}
 }
 
@@ -221,22 +227,32 @@ async function promptConnection(
 	ctx: ExtensionCommandContext,
 	previous: ConnectionInput | undefined,
 ): Promise<NormalizedConnection | undefined> {
-	const url = await promptConnectionField(ctx, 'WebDAV URL', previous?.url);
+	const url = await promptConnectionField(ctx, 'WebDAV URL', previous?.url, normalizeWebDavUrl);
 	if (url === undefined) {
 		return undefined;
 	}
-	const remotePath = await promptRemotePath(ctx, previous?.remotePath);
+	const remotePath = await promptConnectionField(
+		ctx,
+		'Remote path',
+		previous?.remotePath,
+		normalizeRemotePath,
+	);
 	if (remotePath === undefined) {
 		return undefined;
 	}
-	const username = await promptConnectionField(ctx, 'Username', previous?.username);
+	const username = await promptConnectionField(
+		ctx,
+		'Username',
+		previous?.username,
+		normalizeUsername,
+	);
 	if (username === undefined) {
 		return undefined;
 	}
 
 	let password: string;
 	if (previous === undefined) {
-		const enteredPassword = await promptSecret(ctx, 'WebDAV password');
+		const enteredPassword = await promptPassword(ctx);
 		if (enteredPassword === undefined) {
 			return undefined;
 		}
@@ -249,7 +265,7 @@ async function promptConnection(
 		if (choice === 'Keep current password') {
 			password = previous.password;
 		} else {
-			const enteredPassword = await promptSecret(ctx, 'WebDAV password');
+			const enteredPassword = await promptPassword(ctx);
 			if (enteredPassword === undefined) {
 				return undefined;
 			}
