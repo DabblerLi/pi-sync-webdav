@@ -5,7 +5,7 @@
 `pi-sync-webdav` is a Pi Package for manual configuration sync over one Basic Auth WebDAV connection.
 
 - Commands: `/sync-webdav`, `settings`, `status`, `diff`, `push`, `pull`, `restore`, and `cleanup`.
-- `/sync-webdav` initializes an unconfigured package; otherwise its dashboard offers routine commands. `cleanup` remains available only as an explicit subcommand. `settings` edits the complete connection, the local push selection, or the push exclusion rules. Saving a connection validates read and write access but does not start a push or pull.
+- `/sync-webdav` initializes an unconfigured package; otherwise its dashboard offers routine commands. `cleanup` remains available only as an explicit subcommand. `settings` edits the complete connection, the local push selection, or the push exclusion rules. Saving a connection validates read and write access but does not start a push or pull. A failed validation keeps the entered values: empty input keeps the previous value, so only the wrong fields need editing before a retry.
 - Sync is always user initiated. There is no background sync, file watching, multi-target support, ETag/LOCK handling, remote history, or backward compatibility.
 - The plugin supports standard WebDAV operations only: `COPY`, `MKCOL`, `PROPFIND`, `GET`, `PUT`, and `DELETE`.
 
