@@ -295,6 +295,75 @@ describe('sync command registration', () => {
 		expect(notify).toHaveBeenCalledWith('Connection validation cancelled.', 'info');
 	});
 
+	it('keeps the entered connection values when validation fails and retries', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const { command: registered } = registerTestCommand(root);
+		const notify = vi.fn();
+		const input = vi
+			.fn()
+			.mockResolvedValueOnce(server.baseUrl)
+			.mockResolvedValueOnce('pi-sync-webdav')
+			.mockResolvedValueOnce('alice')
+			.mockResolvedValue('');
+		const driver = createCustomDriver([
+			valueStep('wrong-password'),
+			valueStep(true),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('settings.json')]),
+			{ type: 'complete' },
+			valueStep('Change password'),
+			valueStep('password'),
+			valueStep(true),
+			{ type: 'complete' },
+		]);
+
+		await registered.handler('', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(input).toHaveBeenCalledTimes(6);
+		expect(input).toHaveBeenNthCalledWith(4, `WebDAV URL (Enter keeps ${server.baseUrl})`);
+		expect(notify).toHaveBeenCalledWith('WebDAV authentication failed', 'error');
+		expect(await readConfig(root)).toMatchObject({
+			connection: { password: 'password', username: 'alice' },
+			pushInclude: [parsePushInclude('settings.json')],
+		});
+	});
+
+	it('does not save when the connection prompt is cancelled after a failed validation', async () => {
+		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
+		temporaryDirectories.push(root);
+		const server = await MockWebDavServer.create();
+		servers.push(server);
+		const { command: registered } = registerTestCommand(root);
+		const notify = vi.fn();
+		const input = vi
+			.fn()
+			.mockResolvedValueOnce(server.baseUrl)
+			.mockResolvedValueOnce('pi-sync-webdav')
+			.mockResolvedValueOnce('alice')
+			.mockResolvedValue(undefined);
+		const driver = createCustomDriver([
+			valueStep('wrong-password'),
+			valueStep(true),
+			{ type: 'complete' },
+			valueStep([parsePushInclude('settings.json')]),
+			{ type: 'complete' },
+		]);
+
+		await registered.handler('', {
+			mode: 'tui',
+			ui: { custom: driver.custom, input, notify },
+		} as unknown as ExtensionCommandContext);
+
+		expect(notify).toHaveBeenCalledWith('WebDAV authentication failed', 'error');
+		expect(await readConfig(root)).toBeUndefined();
+	});
+
 	it('updates push selection locally through settings without requesting connection input', async () => {
 		const root = await createTemporaryDirectory('pi-sync-webdav-commands-');
 		temporaryDirectories.push(root);
